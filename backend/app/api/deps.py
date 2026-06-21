@@ -69,14 +69,14 @@ async def get_current_user(
     if user.tier != UserTier.FREE and user.tier_expired_at is not None:
         if user.tier_expired_at < now:
             user.tier = UserTier.FREE
-            user.litellm_api_key = f"sk-litellm-free-{uuid.uuid4().hex[:8]}"
+            user.litellm_user_key = f"sk-litellm-free-{uuid.uuid4().hex[:8]}"
             user.tier_expired_at = None
             user.litellm_key_expired_at = None
             downgraded = True
             
     if not downgraded and user.litellm_key_expired_at is not None:
         if user.litellm_key_expired_at < now:
-            user.litellm_api_key = f"sk-litellm-free-{uuid.uuid4().hex[:8]}"
+            user.litellm_user_key = f"sk-litellm-free-{uuid.uuid4().hex[:8]}"
             user.litellm_key_expired_at = None
             downgraded = True
             

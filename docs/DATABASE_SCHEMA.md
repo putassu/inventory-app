@@ -11,7 +11,7 @@
 - `email` (String) — Уникальный email пользователя.
 - `hashed_password` (String) — Хэш пароля.
 - `tier` (Enum: `UserTier`) — Уровень подписки (`FREE`, `STANDARD`, `PREMIUM`). Влияет на лимиты.
-- `litellm_api_key` (String, nullable) — Уникальный ключ для шлюза LiteLLM.
+- `litellm_user_key` (String, nullable) — Уникальный ключ для шлюза LiteLLM.
 - `is_active` (Boolean)
 - `created_at`, `updated_at` (Timestamp)
 - `tier_expired_at` (Timestamp, nullable) — Дата истечения платной подписки. Если дата в прошлом, бэкенд делает `lazy-downgrade` до `FREE`.

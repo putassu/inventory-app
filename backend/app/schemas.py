@@ -244,7 +244,7 @@ class UserResponse(BaseModel):
         description="Subscription tier / tariff plan", 
         examples=["FREE"]
     )
-    litellm_api_key: Optional[str] = Field(
+    litellm_user_key: Optional[str] = Field(
         None, 
         description="API key for LiteLLM gateway with assigned quotas", 
         examples=["sk-litellm-free-key"]
@@ -308,7 +308,7 @@ class TokenData(BaseModel):
         None, 
         description="User subscription tier decoded from token"
     )
-    litellm_api_key: Optional[str] = Field(
+    litellm_user_key: Optional[str] = Field(
         None, 
         description="User's LiteLLM key decoded from token"
     )

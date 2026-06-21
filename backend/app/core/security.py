@@ -26,7 +26,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
-def create_access_token(subject: Any, tier: str, litellm_api_key: Optional[str] = None, expires_delta: Optional[datetime.timedelta] = None) -> str:
+def create_access_token(subject: Any, tier: str, litellm_user_key: Optional[str] = None, expires_delta: Optional[datetime.timedelta] = None) -> str:
     """
     Generate a JWT access token for the subject user.
     Includes subscription tier and optional LiteLLM API key in payload claims.
@@ -42,7 +42,7 @@ def create_access_token(subject: Any, tier: str, litellm_api_key: Optional[str] 
         "exp": expire,
         "sub": str(subject),
         "tier": tier,
-        "litellm_api_key": litellm_api_key
+        "litellm_user_key": litellm_user_key
     }
     
     encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)

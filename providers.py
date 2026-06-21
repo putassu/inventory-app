@@ -10,7 +10,7 @@ class LiteLLMProvider:
         self.api_url = settings.API_URL
         self.headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {settings.LITELLM_API_KEY}"
+            "Authorization": f"Bearer {settings.LITELLM_USER_KEY}"
         }
 
     async def generate_multimodal(self, model_name: str, system_prompt: str, user_content: List[Dict[str, Any]], timeout_seconds: float = 600.0) -> Dict[Any, Any]:

@@ -308,9 +308,9 @@ async def check_expired_subscriptions(ctx):
         expired_users = res.scalars().all()
         
         for user in expired_users:
-            old_key = user.litellm_api_key
+            old_key = user.litellm_user_key
             user.tier = UserTier.FREE
-            user.litellm_api_key = f"sk-litellm-free-{uuid.uuid4().hex[:8]}"
+            user.litellm_user_key = f"sk-litellm-free-{uuid.uuid4().hex[:8]}"
             user.tier_expired_at = None
             user.litellm_key_expired_at = None
             user.updated_at = now
@@ -322,7 +322,7 @@ async def check_expired_subscriptions(ctx):
                     async with httpx.AsyncClient() as client:
                         resp = await client.post(
                             f"{settings.LITELLM_API_BASE}/key/delete",
-                            headers={"Authorization": f"Bearer {settings.LITELLM_API_KEY}"},
+                            headers={"Authorization": f"Bearer {settings.LITELLM_USER_KEY}"},
                             json={"key": old_key},
                             timeout=2.0
                         )

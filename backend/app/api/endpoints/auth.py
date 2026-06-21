@@ -44,7 +44,7 @@ async def register(
         email=data.email,
         hashed_password=hashed,
         tier=UserTier.FREE,
-        litellm_api_key=litellm_key,
+        litellm_user_key=litellm_key,
         is_active=True
     )
     
@@ -112,7 +112,7 @@ async def login(
     token = create_access_token(
         subject=user.id,
         tier=user.tier.value,
-        litellm_api_key=user.litellm_api_key
+        litellm_user_key=user.litellm_user_key
     )
     
     return {"access_token": token, "token_type": "bearer"}

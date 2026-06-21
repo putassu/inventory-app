@@ -28,7 +28,7 @@ class Config:
     
     # LiteLLM
     LITELLM_API_BASE = os.getenv("LITELLM_API_BASE", "http://172.17.0.1:4000")
-    LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "")
+    LITELLM_USER_KEY = os.getenv("LITELLM_USER_KEY", "")
     API_URL = f"{LITELLM_API_BASE}/v1/chat/completions" 
     
     # S3 / MinIO

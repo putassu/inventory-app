@@ -57,7 +57,7 @@ class User(Base):
         server_default=text("'FREE'::user_tier"),
         default=UserTier.FREE
     )
-    litellm_api_key: Mapped[Optional[str]] = mapped_column(
+    litellm_user_key: Mapped[Optional[str]] = mapped_column(
         String(255),
         nullable=True
     )
