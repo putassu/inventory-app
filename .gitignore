@@ -6,6 +6,7 @@
 .env.*
 *.env
 litellm/
+asr/
 data/
 _archive/
 docs.md
