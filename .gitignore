@@ -1,0 +1,49 @@
+# ========================
+# Project Specific
+# ========================
+.env
+.env-server
+.env.*
+*.env
+litellm/
+data/
+_archive/
+docs.md
+*_xray_config.json
+
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+venv/
+.venv/
+env/
+.env_python/
+*.egg-info/
+dist/
+build/
+
+# ========================
+# Node.js / Frontend
+# ========================
+node_modules/
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+
+# ========================
+# IDEs and OS
+# ========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.gemini/

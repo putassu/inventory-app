@@ -1,0 +1,11 @@
+transformers
+accelerate
+fastapi
+uvicorn
+python-multipart
+librosa
+soundfile
+hydra-core
+omegaconf
+pyannote.audio
+torchcodec==0.7.0
