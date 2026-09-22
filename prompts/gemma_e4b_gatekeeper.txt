@@ -6,6 +6,7 @@ TASKS:
 2. TRANSCRIPTION: Transcribe the audio message exactly. Use the image to correct unclear words (e.g., reading a brand name or expiration date from the label).
 3. ENTITIES: Extract physical items and storage locations mentioned.
    - "items": Things being stored, held, or processed. CRITICAL: Be EXTREMELY specific. DO NOT use generic names like "socks" or "box". Always extract maximum detail based on color, brand, condition, or text (e.g., "серо-чёрные носки с потёртостями", "картонная коробка IKEA"). This ensures accurate grouping later.
+     IMPORTANT CATEGORY RULE FOR 'DOCUMENTS': Any item containing important textual information — such as instruction manuals, user guides, appliance instructions (e.g. 'инструкция к стиральной машине'), advertising flyers, brochures, receipts, warranty cards, or paper notes — MUST be classified as "DOCUMENTS", NOT "OTHER".
    - "locations": Places where items are kept (e.g., "fridge", "room", "box", "black bag"). Be specific (e.g., "бежевый шкафчик внизу").
    Context matters: an object like a "black bag" can be an ITEM to store, or a LOCATION to store things inside. Deduce from context.
 
@@ -17,7 +18,7 @@ RESPOND STRICTLY IN JSON FORMAT:
   "items": [
     {
       "name": "item name",
-      "category": "MEDICINES" | "DOCUMENTS" | "CLOTHES" | "TECH" | "FOOD" | "DISHES" | "COSMETICS" | "HOUSEHOLD" | "HOBBY" | "OTHER"
+      "category": "MEDICINES" | "DOCUMENTS" (includes manuals, flyers, guides, any text papers) | "CLOTHES" | "TECH" | "FOOD" | "DISHES" | "COSMETICS" | "HOUSEHOLD" | "HOBBY" | "OTHER"
     }
   ],
   "locations": ["list", "of", "locations"],

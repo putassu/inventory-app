@@ -1,106 +1,103 @@
+name: inventarizator
+
+x-app: &app
+  build: .
+  image: inventarizator:local
+  env_file: .env.local
+  environment:
+    INV_DATABASE_URL: postgresql+asyncpg://inventory:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres/inventory
+    INV_REDIS_URL: redis://redis:6379/0
+    INV_QDRANT_URL: http://qdrant:6333
+    INV_S3_ENDPOINT: http://minio:9000
+    INV_S3_ACCESS_KEY: inventory
+    INV_S3_SECRET_KEY: ${MINIO_PASSWORD:?Set MINIO_PASSWORD}
+    INV_OLLAMA_URL: http://host.docker.internal:11434
+  extra_hosts: ["host.docker.internal:host-gateway"]
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+  restart: unless-stopped
+  volumes: ["backups:/app/data/backups"]
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: inventory_postgres
-    restart: always
-    # Жестко ограничиваем память, которую Postgres забирает под свои нужды
-    command: postgres -c shared_buffers=64MB -c max_connections=30 -c work_mem=4MB
-    ports:
-      - "5433:5432"
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-inventory_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
-      POSTGRES_DB: ${POSTGRES_DB:-inventory_db}
-    volumes:
-      - ./data/postgres_data:/var/lib/postgresql/data
-    mem_limit: 256m       # Максимум реальной RAM
-    memswap_limit: 1024m  # RAM + Swap
+      POSTGRES_USER: inventory
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: inventory
+    command: postgres -c shared_buffers=32MB -c max_connections=50 -c work_mem=2MB
+    mem_limit: 256m
+    volumes: ["postgres:/var/lib/postgresql/data"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-inventory_user} -d ${POSTGRES_DB:-inventory_db}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
+      test: ["CMD-SHELL", "pg_isready -U inventory -d inventory"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
   redis:
     image: redis:7-alpine
-    container_name: inventory_redis
-    restart: always
-    ports:
-      - "6379:6379"
-    # Ограничиваем кэш Redis
-    command: redis-server --save 60 1 --loglevel warning --maxmemory 64mb --maxmemory-policy allkeys-lru
-    volumes:
-      - ./data/redis_data:/data
-    mem_limit: 128m
-    memswap_limit: 512m
+    command: redis-server --maxmemory 32mb --maxmemory-policy noeviction --save "" --appendonly no
+    mem_limit: 64m
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    restart: unless-stopped
   qdrant:
     image: qdrant/qdrant:v1.18.0
-    container_name: inventory_qdrant
-    restart: always
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - ./data/qdrant_data:/qdrant/storage
-    # Qdrant любит память для векторных индексов. Ограничиваем, остальное пойдет в Swap
-    mem_limit: 512m
-    memswap_limit: 1536m
-
+    mem_limit: 192m
+    volumes: ["qdrant:/qdrant/storage"]
+    environment: {QDRANT__SERVICE__MAX_REQUEST_SIZE_MB: 8}
+    restart: unless-stopped
   minio:
     image: minio/minio:RELEASE.2024-03-30T09-41-56Z
-    container_name: inventory_minio
-    restart: always
-    command: server /data --console-address ":9001"
+    command: server /data
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
-      GOMEMLIMIT: 256MiB # Критично важно для ограничения памяти Go-приложений
-    ports:
-      - "9010:9000" # API
-      - "9011:9001" # Console (UI)
-    volumes:
-      - ./data/minio_data:/data
-    mem_limit: 512m
-    memswap_limit: 1536m
+      MINIO_ROOT_USER: inventory
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:?Set MINIO_PASSWORD}
+      GOMEMLIMIT: 128MiB
+    mem_limit: 192m
+    volumes: ["media:/data"]
+    restart: unless-stopped
+  api:
+    <<: *app
+    ports: ["127.0.0.1:8000:8000"]
+    mem_limit: 192m
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health/ready')"]
+      interval: 15s
       timeout: 5s
       retries: 5
+  cpu:
+    <<: *app
+    command: python -m app.cli worker cpu
+    mem_limit: 256m
+  ml:
+    <<: *app
+    command: python -m app.cli worker ml
+    mem_limit: 256m
+  scheduler:
+    <<: *app
+    command: python -m app.cli worker scheduler
+    mem_limit: 160m
+  cloud:
+    <<: *app
+    profiles: [cloud]
+    command: python -m app.cli worker cloud
+    mem_limit: 192m
+  web:
+    build: ./frontend
+    ports: ["127.0.0.1:8080:80"]
+    depends_on: [api]
+    mem_limit: 32m
+    restart: unless-stopped
 
-  # Автоматическая инициализация бакета
-  minio-init:
-    image: minio/mc:latest
-    container_name: inventory_minio_init
-    depends_on:
-      minio:
-        condition: service_healthy
-    mem_limit: 128m
-    memswap_limit: 256m
-    entrypoint: >
-      /bin/sh -c "
-      /usr/bin/mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER:-admin} ${MINIO_ROOT_PASSWORD:-};
-      /usr/bin/mc mb myminio/inventory-media --ignore-existing;
-      /usr/bin/mc anonymous set download myminio/inventory-media;
-      exit 0;
-      "
-
-  db_migrator:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    container_name: inventory_db_migrator
-    command: ["python", "scripts/migrate_admin.py"]
-    env_file:
-      - .env
-    environment:
-      - PYTHONPATH=/app
-    depends_on:
-      postgres:
-        condition: service_healthy
+volumes:
+  postgres:
+  media:
+  qdrant:
+  backups:

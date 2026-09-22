@@ -14,38 +14,45 @@ CRITICAL NAMING RULE: Always extract EXTREMELY specific and unique names for ite
 CATEGORIES:
 Choose from: MEDICINES, DOCUMENTS, CLOTHES, TECH, FOOD, DISHES, COSMETICS, HOUSEHOLD, HOBBY, OTHER.
 
-{% set classes = [] %}
-{% if extracted_items %}
+{% set items_list = extracted_items | default(items) | default([]) %}
+{% set classes = classes | default([]) %}
+{% if items_list %}
 GATEKEEPER CONTEXT:
 A fast gatekeeper model already pre-processed the input and found the following items:
-{% for item in extracted_items %}
-- Name: {{ item.name }}, Expected Class: {{ item.category }}
-  {% set _ = classes.append(item.category) %}
+{% for item in items_list %}
+- Name: {{ item.name }}, Expected Class: {{ item.category | default(item.class) }}
+  {% if item.category is defined %}
+    {% set _ = classes.append(item.category | string) %}
+  {% elif item.class is defined %}
+    {% set _ = classes.append(item.class | string) %}
+  {% endif %}
 {% endfor %}
+{% set classes_str = classes | join(' ') | upper %}
 
 Based on the expected classes, focus heavily on extracting these attributes if applicable:
-{% if 'MEDICINES' in classes %}
+{% if 'MEDICINES' in classes_str %}
 - MEDICINES: "expiry_date" (YYYY-MM-DD), "active_ingredient", "dosage".
 {% endif %}
-{% if 'DOCUMENTS' in classes %}
-- DOCUMENTS: Full OCR text in the "description" or a dedicated field, "document_type", "owner_name", "issue_date", "expiry_date". (Must accurately transcribe text!)
+{% if 'DOCUMENTS' in classes_str %}
+- DOCUMENTS: Concise summary of the most important information (do NOT do full OCR), "document_type", "owner_name", "issue_date", "expiry_date". (Summarize key points, instructions, or terms!)
 {% endif %}
-{% if 'CLOTHES' in classes %}
+{% if 'CLOTHES' in classes_str %}
 - CLOTHES: "size", "season", "brand", "color", "material".
 {% endif %}
-{% if 'TECH' in classes %}
+{% if 'TECH' in classes_str %}
 - TECH: "brand", "model", "serial_number", "warranty_until".
 {% endif %}
-{% if 'FOOD' in classes %}
+{% if 'FOOD' in classes_str %}
 - FOOD: "expiry_date", "storage_conditions".
 {% endif %}
-{% if 'COSMETICS' in classes %}
+{% if 'COSMETICS' in classes_str %}
 - COSMETICS: "expiry_date", "purpose", "brand".
 {% endif %}
-{% if 'HOUSEHOLD' in classes %}
+{% if 'HOUSEHOLD' in classes_str %}
 - HOUSEHOLD: "expiry_date", "purpose", "hazard_level".
 {% endif %}
 {% endif %}
+{% set classes_str = classes | join(' ') | upper %}
 
 RESPOND STRICTLY IN JSON FORMAT:
 {
@@ -61,11 +68,11 @@ RESPOND STRICTLY IN JSON FORMAT:
     "tags": ["extracted", "tags"] or null,
     "synonyms": ["synonyms"] or null,
     "merge_with_item_id": "If 'add_item' and the item is 100% IDENTICAL to an item in the RAG Context, output its UUID here. Else null.",
-    {% if 'DOCUMENTS' in classes %}
-    "ocr_text": "Extracted text for documents",
+    {% if 'DOCUMENTS' in classes_str %}
+    "document_summary": "Concise summary of the most important information from the document/flyer/manual (do NOT do full OCR)",
     {% endif %}
     "attributes": {
-      {% if 'MEDICINES' in classes or 'FOOD' in classes or 'COSMETICS' in classes or 'HOUSEHOLD' in classes %}
+      {% if 'MEDICINES' in classes_str or 'FOOD' in classes_str or 'COSMETICS' in classes_str or 'HOUSEHOLD' in classes_str %}
       "expiry_date": "YYYY-MM-DD" or null (CRITICAL: aggressively scan ALL corners/sides of the product packaging via OCR for dates like DD.MM.YYYY, MM.YYYY or MM/YY. Also, if the user mentions relative expiration like 'послезавтра' or 'через месяц', translate it to a YYYY-MM-DD format as best as possible, or at least preserve it so schedule_parser can use it),
       {% endif %}
       ... (other specific attributes based on category rules)

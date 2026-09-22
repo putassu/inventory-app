@@ -9,7 +9,6 @@ litellm/
 asr/
 data/
 _archive/
-docs.md
 *_xray_config.json
 
 # ========================
@@ -48,3 +47,25 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 .gemini/
+.codegraph/
+.cache/
+.ruff_cache/
+.mypy_cache/
+.venv-1/
+.github/
+!.env.example
+
+# ========================
+# Local verification material (не часть поставки)
+# ========================
+tests/
+scripts/
+deploy/
+frontend/src/test/
+*.test.*
+docs/*.json
+docs/*-smoke.json
+docs/*-evidence.json
+docs/*-baseline.json
+docs/*-before-guard.json
+docs/schemas/

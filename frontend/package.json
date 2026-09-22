@@ -7,15 +7,14 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
+    "format": "prettier --write src/v1 src/main.jsx vite.config.js eslint.config.js index.html",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
-    "lucide-react": "^1.20.0",
     "react": "^19.2.6",
-    "react-dom": "^19.2.6",
-    "react-router-dom": "^7.18.0"
+    "react-dom": "^19.2.6"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -30,6 +29,7 @@
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.6.0",
     "jsdom": "^29.1.1",
+    "prettier": "^3.9.7",
     "vite": "^8.0.12",
     "vitest": "^4.1.9"
   }

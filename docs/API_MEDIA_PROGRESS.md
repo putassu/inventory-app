@@ -1,0 +1,31 @@
+# Контракт для будущего клиента
+
+Пути имеют префикс `/api/v1`, требуют access token и `X-Workspace-ID`. URL медиа приватные; клиент загружает их с авторизацией. В списке/деталях карточек и поиске:
+
+```json
+{"photos":[{"media_id":"UUID исходника","url":"/api/v1/media/UUID/download","thumbnail":{"media_id":"UUID миниатюры","url":"/api/v1/media/UUID/download","width":256,"height":192}}]}
+```
+
+Без фотографий — `photos: []`, без готовой миниатюры — `thumbnail: null`. API не подменяет её большим исходником молча. После удаления карточки применяются правила недоступности файлов.
+
+`GET /capabilities` возвращает `media_preprocessing`: рекомендации клиенту и жёсткие inference-пределы. Рекомендуемый upload — длинная сторона до 1600 px, JPEG quality около 80; WAV PCM16/16 kHz/mono. Клиент может предложить выбор полезной области фото и обрезку записи пользователем. Автоматическое отсечение речи не должно терять отрицание или начало команды. `POST /media` принимает `client_preprocessed=true`, но сервер всё равно проверяет/нормализует содержимое. Полноразмерный оригинал не обязателен: сжатое фото принимается как исходник.
+
+`width`/`height` исходника при upload описывают закодированные пиксели. EXIF-поворот применяется при подготовке: размеры normalized/thumbnail и manifest соответствуют уже повёрнутому изображению. Upload проверяет контейнер файла; ошибка декодирования обнаруживается CPU worker и видна в задаче, без вызова модели.
+
+Пакетный polling: `POST /tasks/status` со списком `{task_id,status_version}`. Отдельный постоянный запрос для каждой карточки не нужен. Ответ задачи:
+
+```json
+{
+  "stage":"extraction","status":"running",
+  "progress":{
+    "current":{"stage":"extraction","status":"running","started_at":"2026-09-21T10:00:00+00:00"},
+    "history":[{"stage":"media","status":"preparing","started_at":"2026-09-21T09:59:50+00:00","finished_at":"2026-09-21T09:59:52+00:00","duration_ms":2000,"error_code":null}],
+    "percent":null,"estimated_remaining_ms":null
+  },
+  "timing":{"processing_seconds":"2.000000","stage_started_at":"2026-09-21T10:00:00+00:00","server_time":"2026-09-21T10:00:07+00:00"}
+}
+```
+
+История ограничена 64 переходами. `processing_seconds` — время модельных попыток; подготовка/ожидание видны отдельно в history. Null не означает нулевой прогресс. При 304/unchanged клиент продолжает elapsed-таймер последней стадии. Административная диагностика: `GET /admin/tasks/{id}/trace`.
+
+Поступление пары: `quantity:"1",unit_code:"pair"`; одной штуки: `quantity:"1",unit_code:"pcs"`. Новая карточка пары хранит pcs. Для носков с `attributes.counting_unit:"pair"` детали дополнительно содержат `quantity_display:{unit_code:"pair",complete_pairs:1,single_pieces:"1.000000",has_unknown_quantity:false}` при трёх известных штуках. Неизвестное количество — отдельное состояние. Группировка по парам не утверждает совместимость разных цветов/размеров.

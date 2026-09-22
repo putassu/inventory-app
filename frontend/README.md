@@ -1,16 +1,28 @@
-# React + Vite
+# Web-клиент «Инвентаризатора»
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React/Vite-клиент базовой совместимости с backend API v1. Текущая точка входа — `src/main.jsx`, приложение — `src/v1/App.jsx`. Это исходная база для следующего этапа, не готовая реализация полного [ТЗ фронтенда](../docs/FRONTEND_SPEC.md).
 
-Currently, two official plugins are available:
+## Запуск
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Из этого каталога, при запущенном API на `127.0.0.1:8000`:
 
-## React Compiler
+```powershell
+npm ci
+npm run dev
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Открыть `http://localhost:3000`. Vite проксирует `/api/v1` и `/health`. Для локального HTTP серверу нужны соответствующий CORS Origin и `INV_COOKIE_SECURE=false`; рабочая установка использует HTTPS и secure cookie. Секреты модели в frontend не передаются.
 
-## Expanding the ESLint configuration
+```powershell
+npm test
+npm run lint
+npm run build
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Vitest запускает `src/v1/**/*.test.{js,jsx}`; старый `src/test/AuthContext.test.jsx` исключён и относится к удалённому прежнему клиенту. Контейнер собирает статические файлы и отдаёт их nginx с API proxy. Общая установка — в [README](../README.md), HTTP-контракты — в [DOCS.md](../DOCS.md).
+
+## Границы текущей версии
+
+Выполненная совместимость и исторический результат 31 компонентного теста описаны в [EPIC_FRONTEND.md](../docs/EPIC_FRONTEND.md). Браузерный E2E этим не подтверждён. Запись/обрезка аудио, клиентская подготовка фото, полный набор экранов нового ТЗ и все административные сценарии ещё требуют реализации. Backend уже отдаёт миниатюры и сохранённые времена стадий по [API_MEDIA_PROGRESS.md](../docs/API_MEDIA_PROGRESS.md).
+
+Менять протокол и интерфейс следует вместе с contract fixtures; количество, версии, review hash и идентификаторы подтверждений нельзя подменять локальными догадками. Сопоставление требований и существующего API — [отчёт документации](../docs/EPIC_DOCUMENTATION.md).

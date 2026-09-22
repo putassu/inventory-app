@@ -1,0 +1,15 @@
+*
+!app/
+!app/**
+!migrations/
+!migrations/**
+!prompts/
+!prompts/**
+!docs/
+!docs/prompt-baseline.json
+!pyproject.toml
+!uv.lock
+!alembic.ini
+!Dockerfile
+**/__pycache__
+**/*.pyc
