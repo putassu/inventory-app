@@ -30,6 +30,14 @@ def task_view(task):
     require(not task.context.get("deleted"), "TASK_PURGED", "Материалы задачи удалены.", 410)
     return {
         "task_id": task.id,
+        "input_mode": task.input_mode,
+        "parent_task_id": task.parent_task_id,
+        "title": " ".join((task.input_text or "").split())[:160]
+        or {
+            "photo": "Обработка фотографии",
+            "audio": "Обработка голоса",
+            "photo_audio": "Обработка фото и голоса",
+        }.get(task.input_mode, "Обработка запроса"),
         "status": task.status,
         "stage": task.stage,
         "status_version": task.status_version,

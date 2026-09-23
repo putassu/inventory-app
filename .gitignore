@@ -69,3 +69,7 @@ docs/*-evidence.json
 docs/*-baseline.json
 docs/*-before-guard.json
 docs/schemas/
+app.db
+frontend/run_cases.js
+frontend/playwright-report/
+frontend/test-results/

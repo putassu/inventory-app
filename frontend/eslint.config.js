@@ -19,7 +19,26 @@ export default defineConfig([
     },
   },
   {
-    files: ['src/v1/**/*.test.{js,jsx}'],
+    files: ['src/**/*.test.{js,jsx}'],
     languageOptions: { globals: { ...globals.browser, ...globals.vitest } },
+  },
+  {
+    files: ['src/contexts/*.jsx', 'src/components/review/ReviewField.jsx'],
+    rules: {
+      'react-refresh/only-export-components': [
+        'error',
+        {
+          allowExportNames: [
+            'useAuth',
+            'useTheme',
+            'useToast',
+            'useTasks',
+            'terminalTask',
+            'useNotifications',
+            'supportedControls',
+          ],
+        },
+      ],
+    },
   },
 ])

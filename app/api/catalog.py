@@ -496,9 +496,11 @@ async def locations(selected=Depends(scope), db=Depends(database)):
 @router.get("/locations/{location_id}")
 async def get_location(location_id: UUID, selected=Depends(scope), db=Depends(database)):
     await scoped_get(db, Location, location_id, selected.workspace_id)
-    return next(
+    location = next(
         (r for r in await location_tree(db, selected.workspace_id) if r["id"] == str(location_id)), None
     )
+    require(location is not None, "NOT_FOUND", "Место архивировано или недоступно.", 404)
+    return location
 
 
 @router.get("/locations/{location_id}/contents")

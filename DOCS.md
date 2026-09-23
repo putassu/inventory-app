@@ -2221,3 +2221,10 @@ CHECK: `quantity IS NULL OR quantity >= 0`; `(quantity_state IN ('exact','estima
 | `WORKSPACE_REQUIRED` | Передайте X-Workspace-ID или workspace_id. |
 
 Дополнительные коды инфраструктурной оболочки/стадий включают INTERNAL_ERROR, FIELD_VALIDATION_FAILED, MEDIA_PREPARATION_FAILED, UNSUPPORTED_AUDIO и ITEM_DELETED; они обрабатываются по тому же общему envelope/status. Ошибки провайдера не показывают его сырой ответ пользователю.
+
+
+## Дополнение 23–24 сентября: текущий web и task DTO
+
+Рефакторинг текущего React-клиента описан в [отчёте frontend](docs/EPIC_FRONTEND_REFACTOR.md). Клиент подготавливает JPEG до 1600 px и WAV PCM16 mono 16 kHz. Это транспортные файлы: backend по-прежнему независимо проверяет медиа и формирует один ограниченный коллаж для модели. Миниатюры скачиваются с авторизацией; отсутствие thumbnail не запускает фоновую загрузку оригинала.
+
+К ответу `task_view` добавлены `input_mode`, nullable `parent_task_id` и `title`. Title содержит первые 160 символов пользовательского текста после нормализации пробелов либо русское название типа ввода. Состояния и `progress/timing` не изменены. Доступ остаётся ограничен рабочей областью. GET архивированного места теперь отвечает 404 `NOT_FOUND` вместо JSON null.
