@@ -8,7 +8,7 @@ from pydantic import Field
 from sqlalchemy import select
 
 from app.api.catalog import page
-from app.api.deps import database, idempotency_key, scope, write_scope
+from app.api.deps import db_session, idempotency_key, scope, write_scope
 from app.application.auth import aware
 from app.application.idempotency import previous_response, remember
 from app.application.maintenance import cancel_purge, confirm_purge, deletion_manifest
@@ -31,7 +31,7 @@ class ExportInput(StrictModel):
 
 @router.post("/exports", status_code=202)
 async def export(
-    data: ExportInput, key=Depends(idempotency_key), selected=Depends(write_scope), db=Depends(database)
+    data: ExportInput, key=Depends(idempotency_key), selected=Depends(write_scope), db=db_session
 ):
     body = data.model_dump()
     cached = await previous_response(db, selected.user.id, selected.workspace_id, "export", key, body)
@@ -65,7 +65,7 @@ async def export(
 
 
 @router.get("/exports/{export_id}")
-async def export_status(export_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def export_status(export_id: UUID, selected=Depends(scope), db=db_session):
     job = await scoped_get(db, Job, export_id, selected.workspace_id)
     require(job.kind == "export", "NOT_FOUND", "Экспорт не найден.", 404)
     status = "expired" if job.status == "succeeded" and aware(job.expires_at) <= utcnow() else job.status
@@ -79,7 +79,7 @@ async def export_status(export_id: UUID, selected=Depends(scope), db=Depends(dat
 
 
 @router.get("/exports/{export_id}/download")
-async def export_download(export_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def export_download(export_id: UUID, selected=Depends(scope), db=db_session):
     job = await scoped_get(db, Job, export_id, selected.workspace_id)
     require(job.status not in {"expired", "revoked"}, "EXPORT_EXPIRED", "Экспорт больше недоступен.", 410)
     require(job.kind == "export" and job.status == "succeeded", "NOT_FOUND", "Экспорт ещё не готов.", 404)
@@ -97,7 +97,7 @@ class DeletionInput(StrictModel):
 
 @router.post("/deletion-previews", status_code=201)
 async def deletion_preview(
-    data: DeletionInput, key=Depends(idempotency_key), selected=Depends(write_scope), db=Depends(database)
+    data: DeletionInput, key=Depends(idempotency_key), selected=Depends(write_scope), db=db_session
 ):
     body = data.model_dump(mode="json")
     cached = await previous_response(
@@ -141,9 +141,7 @@ class PurgeInput(StrictModel):
 
 
 @router.post("/purge-jobs", status_code=202)
-async def purge(
-    data: PurgeInput, key=Depends(idempotency_key), selected=Depends(write_scope), db=Depends(database)
-):
+async def purge(data: PurgeInput, key=Depends(idempotency_key), selected=Depends(write_scope), db=db_session):
     body = data.model_dump(mode="json")
     cached = await previous_response(db, selected.user.id, selected.workspace_id, "purge", key, body)
     if cached:
@@ -183,7 +181,7 @@ async def purge_jobs(
     limit: int = Query(50, ge=1, le=100),
     cursor: str | None = None,
     selected=Depends(scope),
-    db=Depends(database),
+    db=db_session,
 ):
     return await page(
         db,
@@ -196,7 +194,7 @@ async def purge_jobs(
 
 
 @router.get("/purge-jobs/{job_id}")
-async def purge_status(job_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def purge_status(job_id: UUID, selected=Depends(scope), db=db_session):
     job = await scoped_get(db, Job, job_id, selected.workspace_id)
     require(job.kind == "purge", "NOT_FOUND", "Задание не найдено.", 404)
     return purge_view(job)
@@ -213,7 +211,7 @@ async def cancel_deletion(
     data: CancelPurge,
     key=Depends(idempotency_key),
     selected=Depends(write_scope),
-    db=Depends(database),
+    db=db_session,
 ):
     body = data.model_dump()
     operation = f"cancel_purge:{job_id}"

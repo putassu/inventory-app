@@ -1,5 +1,7 @@
+import { randomId } from '../utils/id'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, write } from '../api/client'
+import { Help } from './ui/Help'
 
 const categories = { medicine: 'Лекарства', food: 'Продукты', document: 'Документы' }
 const initialValues = {
@@ -43,7 +45,7 @@ function RuleForm({ rule, locations, onSave, onCancel }) {
           if (!values.categories.length) throw new Error('Выберите хотя бы одну категорию.')
           const payload = { ...values, offsets_before_expiry: [...new Set(raw.map(Number))] }
           const body = JSON.stringify({ values: payload, enabled })
-          if (request.current?.body !== body) request.current = { body, key: crypto.randomUUID() }
+          if (request.current?.body !== body) request.current = { body, key: randomId() }
           const key = request.current.key
           if (rule)
             await write(
@@ -68,7 +70,14 @@ function RuleForm({ rule, locations, onSave, onCancel }) {
         </p>
       )}
       <fieldset disabled={busy}>
-        <legend>Категории</legend>
+        <legend>
+          Категории{' '}
+          <Help title="Категории напоминаний">
+            Правило проверяет сроки только выбранных категорий. Поддерживаются лекарства, продукты и
+            документы. Неизвестный срок не превращается в выдуманную дату; сначала уточните его в
+            карточке.
+          </Help>
+        </legend>
         {Object.entries(categories).map(([code, label]) => (
           <label className="check" key={code}>
             <input
@@ -88,9 +97,15 @@ function RuleForm({ rule, locations, onSave, onCancel }) {
         ))}
       </fieldset>
       <label>
-        Места
+        Места{' '}
+        <Help title="Места напоминаний">
+          Ограничивает правило выбранными местами хранения. Пустой список означает все места. Здесь
+          выбираются конкретные места по их идентификаторам; включение родителя не следует считать
+          автоматическим выбором всех вложенных секций.
+        </Help>
         <select
           multiple
+          aria-label="Места"
           disabled={busy}
           value={values.location_ids}
           onChange={(e) =>
@@ -109,10 +124,16 @@ function RuleForm({ rule, locations, onSave, onCancel }) {
         <small>Ничего не выбрано — все места.</small>
       </label>
       <label>
-        За сколько дней до срока
+        За сколько дней до срока{' '}
+        <Help title="Дни до срока">
+          До 12 целых чисел от 0 до 3650 через запятую, например 30, 7, 1. Ноль — день окончания
+          срока. Повторяющиеся значения объединяются. Уведомления рассчитываются относительно
+          действующего срока, включая срок после открытия.
+        </Help>
         <input
           disabled={busy}
           value={offsets}
+          aria-label="За сколько дней до срока"
           onChange={(e) => setOffsets(e.target.value)}
           placeholder="30, 7, 1"
         />
@@ -120,21 +141,32 @@ function RuleForm({ rule, locations, onSave, onCancel }) {
       </label>
       <div className="form-grid">
         <label>
-          Время уведомления
+          Время уведомления{' '}
+          <Help title="Время уведомления">
+            Локальное время отправки по часовому поясу этого правила. Если оно попадает в тихие
+            часы, доставка откладывается до их окончания. Уведомления создаются планировщиком,
+            поэтому он должен работать.
+          </Help>
           <input
             disabled={busy}
             required
             type="time"
             value={values.local_delivery_time}
+            aria-label="Время уведомления"
             onChange={(e) => change('local_delivery_time', e.target.value)}
           />
         </label>
         <label>
-          Часовой пояс
+          Часовой пояс{' '}
+          <Help title="Часовой пояс правила">
+            Зона IANA, например Europe/Moscow. Сохраняется в самом правиле независимо от часового
+            пояса профиля и определяет календарные даты, время доставки и тихие часы.
+          </Help>
           <input
             disabled={busy}
             required
             value={values.timezone}
+            aria-label="Часовой пояс"
             onChange={(e) => change('timezone', e.target.value)}
             placeholder="Europe/Moscow"
           />
@@ -145,29 +177,44 @@ function RuleForm({ rule, locations, onSave, onCancel }) {
           disabled={busy}
           type="checkbox"
           checked={values.quiet_hours.length > 0}
+          aria-label="Тихие часы"
           onChange={(e) => change('quiet_hours', e.target.checked ? ['22:00', '08:00'] : [])}
         />
-        Тихие часы
+        Тихие часы{' '}
+        <Help title="Тихие часы">
+          Период без доставки уведомлений, например с 22:00 до 08:00 следующего дня. Отключение
+          снимает это ограничение; уведомления внутри интервала переносятся на его окончание.
+        </Help>
       </label>
       {!!values.quiet_hours.length && (
         <div className="form-grid">
           <label>
-            Начало тишины
+            Начало тишины{' '}
+            <Help title="Начало тишины">
+              Начало ежедневного интервала по часовому поясу правила. Интервал может проходить через
+              полночь, если конец раньше начала.
+            </Help>
             <input
               disabled={busy}
               required
               type="time"
               value={values.quiet_hours[0]}
+              aria-label="Начало тишины"
               onChange={(e) => change('quiet_hours', [e.target.value, values.quiet_hours[1]])}
             />
           </label>
           <label>
-            Конец тишины
+            Конец тишины{' '}
+            <Help title="Конец тишины">
+              Время возобновления доставки. Начало и конец не должны совпадать: для отключения
+              интервала снимите флажок «Тихие часы».
+            </Help>
             <input
               disabled={busy}
               required
               type="time"
               value={values.quiet_hours[1]}
+              aria-label="Конец тишины"
               onChange={(e) => change('quiet_hours', [values.quiet_hours[0], e.target.value])}
             />
           </label>
@@ -178,14 +225,24 @@ function RuleForm({ rule, locations, onSave, onCancel }) {
           disabled={busy}
           type="checkbox"
           checked={values.send_expired}
+          aria-label="Сообщать об истечении срока"
           onChange={(e) => change('send_expired', e.target.checked)}
         />
-        Сообщать об истечении срока
+        Сообщать об истечении срока{' '}
+        <Help title="Сообщать об истечении срока">
+          Создаёт уведомление, когда срок уже истёк. Само по себе не списывает вещь и не отправляет
+          её в архив. Дополнительные повторы настраиваются ниже.
+        </Help>
       </label>
       {values.send_expired && (
         <div className="form-grid">
           <label>
-            Дополнительных повторов
+            Дополнительных повторов{' '}
+            <Help title="Дополнительных повторов">
+              Сколько раз дополнительно напоминать после первого сообщения об истечении. Ноль
+              отключает дополнительные повторы; допустимо до 12. Расписание приёма лекарств эта
+              функция не создаёт.
+            </Help>
             <input
               disabled={busy}
               required
@@ -193,11 +250,16 @@ function RuleForm({ rule, locations, onSave, onCancel }) {
               min="0"
               max="12"
               value={values.repeat_expired_max_count}
+              aria-label="Дополнительных повторов"
               onChange={(e) => change('repeat_expired_max_count', Number(e.target.value))}
             />
           </label>
           <label>
-            Интервал повторов, дни
+            Интервал повторов, дни{' '}
+            <Help title="Интервал повторов">
+              Количество календарных дней между дополнительными уведомлениями об истёкшем сроке, от
+              1 до 365. Используется только при ненулевом числе повторов.
+            </Help>
             <input
               disabled={busy}
               required
@@ -205,16 +267,23 @@ function RuleForm({ rule, locations, onSave, onCancel }) {
               min="1"
               max="365"
               value={values.repeat_expired_interval}
+              aria-label="Интервал повторов, дни"
               onChange={(e) => change('repeat_expired_interval', Number(e.target.value))}
             />
           </label>
         </div>
       )}
       <label>
-        Группировка
+        Группировка{' '}
+        <Help title="Группировка напоминаний">
+          «За день» объединяет напоминания дня, «По категории» разделяет их по типам вещей, «Каждое
+          отдельно» создаёт отдельные сообщения. Это влияет на ленту уведомлений, а не на учёт
+          количества.
+        </Help>
         <select
           disabled={busy}
           value={values.group_mode}
+          aria-label="Группировка"
           onChange={(e) => change('group_mode', e.target.value)}
         >
           <option value="by_day">За день</option>
@@ -227,18 +296,29 @@ function RuleForm({ rule, locations, onSave, onCancel }) {
           disabled={busy}
           type="checkbox"
           checked={values.hide_sensitive_details_on_lock_screen}
+          aria-label="Скрывать чувствительные подробности"
           onChange={(e) => change('hide_sensitive_details_on_lock_screen', e.target.checked)}
         />
-        Скрывать чувствительные подробности
+        Скрывать чувствительные подробности{' '}
+        <Help title="Скрывать чувствительные подробности">
+          Ограничивает подробности чувствительных объектов в уведомлениях этого правила. Полную
+          карточку можно открыть внутри приложения. Не разрешает облачную обработку и не удаляет
+          сведения из учёта.
+        </Help>
       </label>
       <label className="check">
         <input
           disabled={busy}
           type="checkbox"
           checked={values.include_archived}
+          aria-label="Включать архив"
           onChange={(e) => change('include_archived', e.target.checked)}
         />
-        Включать архив
+        Включать архив{' '}
+        <Help title="Включать архив в напоминания">
+          Разрешает учитывать архивные вещи при расчёте этого правила. При выключенном флажке архив
+          не участвует. Это не возвращает вещи из архива в активный каталог.
+        </Help>
       </label>
       {rule && (
         <label className="check">
@@ -246,9 +326,15 @@ function RuleForm({ rule, locations, onSave, onCancel }) {
             disabled={busy}
             type="checkbox"
             checked={enabled}
+            aria-label="Правило включено"
             onChange={(e) => setEnabled(e.target.checked)}
           />
-          Правило включено
+          Правило включено{' '}
+          <Help title="Правило включено">
+            Включённое правило участвует в последующих расчётах планировщика. Отключение сохраняет
+            его настройки, но прекращает создание новых уведомлений по нему; уже созданная история
+            остаётся.
+          </Help>
         </label>
       )}
       <div className="actions">

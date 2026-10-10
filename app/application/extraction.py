@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from pydantic import Field
 
 from app.domain.errors import require
-from app.domain.reference import ATTRIBUTES
+from app.domain.reference import ATTRIBUTES, UNITS
 from app.domain.schemas import Action, Extraction, StrictModel
 
 CATEGORY_MAP = {
@@ -77,6 +77,22 @@ class LegacyOutput(StrictModel):
     has_schedule_mention: bool = False
 
 
+def extraction_schema(candidates):
+    """Ограничиваем ответ модели известными карточками и единицами измерения."""
+    schema = LegacyOutput.model_json_schema()
+    schema["$defs"]["LegacyItem"]["properties"]["unit_of_measure"] = {
+        "enum": [None, *sorted(UNITS.keys() | UNIT_MAP.keys())]
+    }
+    identifiers = {"enum": [None, *(candidate["candidate_id"] for candidate in candidates)]}
+    for name, field in (
+        ("LegacyItem", "merge_with_item_id"),
+        ("LegacyMove", "target_item_id"),
+        ("LegacyConsume", "target_item_id"),
+    ):
+        schema["$defs"][name]["properties"][field] = identifiers
+    return schema
+
+
 def quantity(value):
     if value is None:
         return None
@@ -130,7 +146,7 @@ def normalize_extraction(raw, candidates, locations, context, text="", *, collag
             longest = max(len(loc["name"]) for loc in named)
             location_matches = [loc["id"] for loc in named if len(loc["name"]) == longest]
     location_id = context.get("location_id") or (location_matches[0] if len(location_matches) == 1 else None)
-    attributes = {k: v for k, v in item.attributes.items() if k in ATTRIBUTES[category]}
+    attributes = {k: v for k, v in item.attributes.items() if k in ATTRIBUTES[category] and v is not None}
     if category == "medicine":
         if item.attributes.get("active_ingredient"):
             attributes["active_ingredients"] = [item.attributes["active_ingredient"]]
@@ -166,7 +182,9 @@ def normalize_extraction(raw, candidates, locations, context, text="", *, collag
         )
         if socks:
             category = "clothing"
-            attributes = {k: v for k, v in item.attributes.items() if k in ATTRIBUTES[category]}
+            attributes = {
+                k: v for k, v in item.attributes.items() if k in ATTRIBUTES[category] and v is not None
+            }
             attributes["counting_unit"] = "pair"
             pair = re.search(
                 r"\b(?:(одну|две|три|четыре|пять|\d+)\s+)?(пару|пара|пары|пар)\s+носк", text, re.I

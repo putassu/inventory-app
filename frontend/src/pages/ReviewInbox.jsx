@@ -1,3 +1,4 @@
+import { randomId } from '../utils/id'
 import { Link, useNavigate } from 'react-router-dom'
 import { useEffect, useRef, useState } from 'react'
 import { usePaged } from '../hooks/usePaged'
@@ -7,6 +8,9 @@ import { waitForConfirmation } from '../api/confirmations'
 import { Button } from '../components/ui/Button'
 import { Modal } from '../components/ui/Modal'
 import { supportedControls } from '../components/review/ReviewField'
+import { ChangePreview } from '../components/review/ChangePreview'
+import { label } from '../utils/labels'
+import { ItemReviewStatus } from '../components/ItemReviewStatus'
 export function ReviewInbox() {
   const page = usePaged('/review-inbox?limit=30'),
     { reload } = page
@@ -34,22 +38,22 @@ export function ReviewInbox() {
         }
         const signature = JSON.stringify(body)
         if (attempt.current?.signature !== signature)
-          attempt.current = { signature, key: crypto.randomUUID() }
+          attempt.current = { signature, key: randomId() }
         const review = await write('/review-batches', body, 'POST', attempt.current.key)
         navigate(`/review/${review.proposal_id}`)
       } else {
         setDocuments(current)
         setResults([])
         attempt.current = {
-          key: crypto.randomUUID(),
+          key: randomId(),
           body: {
             items: current.map((row) => ({
               proposal_id: row.proposal_id,
               expected_revision: row.revision,
               observed_review_hash: row.review_hash,
               changes: [],
-              client_request_id: crypto.randomUUID(),
-              idempotency_key: crypto.randomUUID(),
+              client_request_id: randomId(),
+              idempotency_key: randomId(),
             })),
           },
         }
@@ -105,6 +109,9 @@ export function ReviewInbox() {
         </p>
       )}
       {page.loading && <p>Загрузка…</p>}
+      <p className="muted">
+        Сначала ошибки распознавания. Неподтверждённые новые вещи уже находятся в каталоге.
+      </p>
       {selected.size > 0 && (
         <div className="notice actions">
           <span>Выбрано: {selected.size}</span>
@@ -144,6 +151,7 @@ export function ReviewInbox() {
           />
           <div>
             <h2>{proposal.summary}</h2>
+            <ItemReviewStatus item={proposal} link={false} />
             <small>{new Date(proposal.created_at).toLocaleString('ru-RU')}</small>
             {proposal.blocking_count > 0 && <p>Нужно уточнить: {proposal.blocking_count}</p>}
           </div>
@@ -179,9 +187,12 @@ export function ReviewInbox() {
                 <details>
                   <summary>Все изменения</summary>
                   {row.actions.map((action) => (
-                    <pre key={action.action_id}>
-                      {JSON.stringify(action.preview || action.values, null, 2)}
-                    </pre>
+                    <div key={action.action_id}>
+                      <h4>{label(action.type)}</h4>
+                      {action.preview?.changes?.map((change, index) => (
+                        <ChangePreview key={index} before={change.before} after={change.after} />
+                      ))}
+                    </div>
                   ))}
                 </details>
                 {results[i] && (

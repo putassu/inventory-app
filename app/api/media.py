@@ -7,7 +7,7 @@ from fastapi.responses import Response
 from sqlalchemy import select
 
 from app.api.catalog import serialize
-from app.api.deps import database, idempotency_key, scope
+from app.api.deps import db_session, idempotency_key, scope
 from app.application.idempotency import previous_response, remember
 from app.application.settings import effective_settings
 from app.db.models import Binding, Media
@@ -27,7 +27,7 @@ async def upload(
     client_preprocessed: bool = Form(False),
     key=Depends(idempotency_key),
     selected=Depends(scope),
-    db=Depends(database),
+    db=db_session,
 ):
     require(
         privacy_policy in {"local_only", "cloud_allowed"},
@@ -82,7 +82,7 @@ async def upload(
 
 
 @router.get("/media/{media_id}")
-async def metadata(media_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def metadata(media_id: UUID, selected=Depends(scope), db=db_session):
     row = await scoped_get(db, Media, media_id, selected.workspace_id)
     require(row.state == "uploaded", "MEDIA_PURGED", "Файл недоступен.", 410)
     result = serialize(row)
@@ -92,7 +92,7 @@ async def metadata(media_id: UUID, selected=Depends(scope), db=Depends(database)
 
 
 @router.get("/media/{media_id}/download")
-async def download(media_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def download(media_id: UUID, selected=Depends(scope), db=db_session):
     row = await scoped_get(db, Media, media_id, selected.workspace_id)
     require(row.state == "uploaded", "MEDIA_PURGED", "Файл недоступен.", 410)
     return Response(
@@ -104,7 +104,7 @@ async def download(media_id: UUID, selected=Depends(scope), db=Depends(database)
 
 @router.post("/media/{media_id}/delete-preview")
 async def delete_preview(
-    media_id: UUID, key=Depends(idempotency_key), selected=Depends(scope), db=Depends(database)
+    media_id: UUID, key=Depends(idempotency_key), selected=Depends(scope), db=db_session
 ):
     row = await scoped_get(db, Media, media_id, selected.workspace_id)
     require(row.state == "uploaded", "MEDIA_PURGED", "Файл недоступен.", 410)

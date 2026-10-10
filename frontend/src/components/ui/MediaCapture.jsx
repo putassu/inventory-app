@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { Button } from './Button'
 import { Input } from './Input'
 import { Modal } from './Modal'
@@ -50,6 +50,30 @@ function PhotoEditor({ file, onSave, onClose }) {
   const [rotation, setRotation] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [preview, setPreview] = useState(null)
+  const previewUrl = useBlobUrl(preview)
+  useEffect(() => {
+    let active = true
+    const timer = setTimeout(() => {
+      compressImage(file, 480, { crop, rotation })
+        .then((image) => {
+          if (active) {
+            setPreview(image)
+            setError('')
+          }
+        })
+        .catch((cause) => {
+          if (active) {
+            setPreview(null)
+            setError(cause.message)
+          }
+        })
+    }, 200)
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
+  }, [file, crop, rotation])
   return (
     <Modal isOpen onClose={onClose} busy={busy} title="Обрезка и поворот фото">
       <div className="crop-preview">
@@ -74,6 +98,7 @@ function PhotoEditor({ file, onSave, onClose }) {
             key={key}
             label={title}
             type="number"
+            disabled={busy}
             min="0"
             max="100"
             value={crop[key]}
@@ -84,9 +109,19 @@ function PhotoEditor({ file, onSave, onClose }) {
         ))}
       </div>
       <p>Поворот: {rotation}°</p>
+      {preview && previewUrl && (
+        <figure className="crop-result">
+          <img src={previewUrl} alt="Результат обрезки и поворота" />
+          <figcaption>После обрезки и поворота</figcaption>
+        </figure>
+      )}
       {error && <p role="alert">{error}</p>}
       <div className="toolbar">
-        <Button variant="secondary" onClick={() => setRotation((rotation + 90) % 360)}>
+        <Button
+          disabled={busy}
+          variant="secondary"
+          onClick={() => setRotation((rotation + 90) % 360)}
+        >
           Повернуть на 90°
         </Button>
         <Button
@@ -108,8 +143,16 @@ function PhotoEditor({ file, onSave, onClose }) {
     </Modal>
   )
 }
-export function MediaCapture({ onMediaCaptured, disabled = false, onBusyChange }) {
-  const [photos, setPhotos] = useState([])
+export function MediaCapture({
+  onMediaCaptured,
+  disabled = false,
+  onBusyChange,
+  maxPhotos = 3,
+  maxAudioSeconds = 60,
+  photosOnly = false,
+  initialPhotos = [],
+}) {
+  const [photos, setPhotos] = useState(initialPhotos)
   const [audio, setAudio] = useState(null)
   const [recording, setRecording] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -140,15 +183,40 @@ export function MediaCapture({ onMediaCaptured, disabled = false, onBusyChange }
     setPhotos(next)
     onMediaCaptured({ type: 'photo', files: next })
   }
-  function changeAudio(file) {
-    setAudio(file)
-    onMediaCaptured({ type: 'audio', file })
-  }
+  const changeAudio = useCallback(
+    (file) => {
+      setAudio(file)
+      onMediaCaptured({ type: 'audio', file })
+    },
+    [onMediaCaptured],
+  )
+  useEffect(() => {
+    if (!recording) return
+    const stop = setTimeout(
+      async () => {
+        if (recorder.current?.recorder?.state !== 'recording') return
+        setBusy(true)
+        try {
+          const file = await recorder.current.stop()
+          if (mounted.current) changeAudio(file)
+        } catch (cause) {
+          if (mounted.current) setError(cause.message)
+        } finally {
+          if (mounted.current) {
+            setRecording(false)
+            setBusy(false)
+          }
+        }
+      },
+      Math.min(maxAudioSeconds, 300) * 1000,
+    )
+    return () => clearTimeout(stop)
+  }, [recording, maxAudioSeconds, changeAudio])
   async function addPhotos(event) {
     const files = [...event.target.files]
     event.target.value = ''
-    if (photos.length + files.length > 20) {
-      setError('Можно прикрепить не больше 20 фотографий.')
+    if (photos.length + files.length > maxPhotos) {
+      setError(`Можно прикрепить не больше ${maxPhotos} фотографий к одной задаче.`)
       return
     }
     setBusy(true)
@@ -185,13 +253,28 @@ export function MediaCapture({ onMediaCaptured, disabled = false, onBusyChange }
     } catch (cause) {
       recorder.current?.cancel()
       setRecording(false)
-      setError(cause.message || 'Микрофон недоступен.')
+      setError(
+        {
+          NotAllowedError:
+            'Доступ к микрофону запрещён. Разрешите его в настройках браузера или прикрепите аудиофайл.',
+          NotFoundError: 'Микрофон не найден. Подключите его или прикрепите аудиофайл.',
+          NotReadableError:
+            'Микрофон занят или недоступен. Закройте другие приложения записи и повторите попытку.',
+        }[cause.name] ||
+          cause.message ||
+          'Микрофон недоступен.',
+      )
     } finally {
       if (mounted.current) setBusy(false)
     }
   }
   return (
-    <div className="page-stack card">
+    <div className={photosOnly ? 'page-stack photo-input' : 'page-stack card'}>
+      <p className="muted">
+        {photosOnly
+          ? 'Фото (необязательно)'
+          : `До ${maxPhotos} фото и ${Math.min(maxAudioSeconds, 300)} секунд аудио.`}
+      </p>
       <div className="toolbar">
         <label className="btn btn-secondary">
           Прикрепить фото
@@ -202,7 +285,7 @@ export function MediaCapture({ onMediaCaptured, disabled = false, onBusyChange }
             multiple
             disabled={disabled || busy || recording}
             onChange={addPhotos}
-            hidden
+            className="visually-hidden"
           />
         </label>
         <label className="btn btn-secondary">
@@ -214,39 +297,45 @@ export function MediaCapture({ onMediaCaptured, disabled = false, onBusyChange }
             capture="environment"
             disabled={disabled || busy || recording}
             onChange={addPhotos}
-            hidden
+            className="visually-hidden"
           />
         </label>
-        <Button
-          variant={recording ? 'danger' : 'secondary'}
-          disabled={disabled || busy}
-          onClick={toggleRecording}
-        >
-          {recording ? `Остановить запись (${seconds} с)` : 'Записать голос'}
-        </Button>
-        <label className="btn btn-secondary">
-          Аудиофайл
-          <input
-            aria-label="Прикрепить аудиофайл"
-            type="file"
-            accept="audio/*"
-            disabled={disabled || busy || recording}
-            hidden
-            onChange={async (event) => {
-              const file = event.target.files[0]
-              event.target.value = ''
-              if (!file) return
-              setBusy(true)
-              try {
-                changeAudio(await prepareAudio(file))
-              } catch (cause) {
-                setError(cause.message)
-              } finally {
-                setBusy(false)
-              }
-            }}
-          />
-        </label>
+        {!photosOnly && (
+          <>
+            <Button
+              variant={recording ? 'danger' : 'secondary'}
+              disabled={disabled || busy}
+              onClick={toggleRecording}
+            >
+              {recording ? `Остановить запись (${seconds} с)` : 'Записать голос'}
+            </Button>
+            <label className="btn btn-secondary">
+              Аудиофайл
+              <input
+                aria-label="Прикрепить аудиофайл"
+                type="file"
+                accept="audio/*"
+                disabled={disabled || busy || recording}
+                className="visually-hidden"
+                onChange={async (event) => {
+                  const file = event.target.files[0]
+                  event.target.value = ''
+                  if (!file) return
+                  setBusy(true)
+                  setError('')
+                  try {
+                    const prepared = await prepareAudio(file)
+                    if (mounted.current) changeAudio(prepared)
+                  } catch (cause) {
+                    setError(cause.message)
+                  } finally {
+                    setBusy(false)
+                  }
+                }}
+              />
+            </label>
+          </>
+        )}
       </div>
       {busy && <p role="status">Подготовка медиа на устройстве…</p>}
       {recording && (
@@ -279,6 +368,13 @@ export function MediaCapture({ onMediaCaptured, disabled = false, onBusyChange }
       </div>
       {audio && (
         <div className="page-stack">
+          <p>
+            Длительность: {audio.durationSeconds?.toFixed(1)} с
+            {audio.durationSeconds > maxAudioSeconds
+              ? ` — обрежьте до ${maxAudioSeconds} с перед отправкой`
+              : ''}
+            .
+          </p>
           <audio controls src={audioUrl || undefined} />
           <div className="toolbar">
             <Input
@@ -297,9 +393,14 @@ export function MediaCapture({ onMediaCaptured, disabled = false, onBusyChange }
               disabled={disabled || busy}
               onClick={async () => {
                 setBusy(true)
+                setError('')
                 try {
                   changeAudio(
-                    await prepareAudio(audio, Number(from), to === '' ? null : Number(to)),
+                    await prepareAudio(
+                      audio,
+                      Number(from.replace(',', '.')),
+                      to === '' ? null : Number(to.replace(',', '.')),
+                    ),
                   )
                   setFrom('0')
                   setTo('')

@@ -4,6 +4,15 @@ import { write } from '../../api/client'
 import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
 import { label } from '../../utils/labels'
+import { Help } from '../../components/ui/Help'
+const queueHelp = {
+  default: 'Обычные задачи распознавания, добавленные пользователем.',
+  bulk: 'Задачи массового ввода. Делят доступное время модели с обычной очередью согласно весам.',
+  cpu: 'Подготовка файлов и применение подтверждённых команд. Пауза может задержать сохранение ручных вещей и мест; LLM для этих операций не нужна.',
+  cloud: 'Вызовы внешних моделей для материалов, которым разрешена внешняя обработка.',
+  maintenance:
+    'Фоновые работы обслуживания, включая обновление поискового индекса и эмбеддингов. На слабом inference они тоже потребляют ресурсы модели.',
+}
 export function AdminQueues() {
   const { data, error: loadError, reload } = useResource('/admin/queues')
   const [stopped, setStopped] = useState(false),
@@ -38,7 +47,15 @@ export function AdminQueues() {
           {['default', 'bulk', 'cpu', 'cloud', 'maintenance'].map((name) => (
             <div className="card actions" key={name}>
               <div>
-                <h3>{name}</h3>
+                <h3 className="field-label">
+                  {name}
+                  <Help title={`Очередь ${name}`}>
+                    {queueHelp[name]} Пауза запрещает новую отправку из этой очереди; уже начатые
+                    работы продолжаются. Возобновление разрешает разбор ожидающих задач, поэтому
+                    сначала проверьте их число. PostgreSQL хранит задания, Redis используется для
+                    доставки.
+                  </Help>
+                </h3>
                 {data.queues
                   .filter((q) => q.name === name)
                   .map((q) => (
@@ -61,7 +78,15 @@ export function AdminQueues() {
             </div>
           ))}
           <section className="card stack">
-            <h3>GPU: {data.gpu?.state || 'нет данных'}</h3>
+            <h3 className="field-label">
+              GPU: {data.gpu?.state || 'нет данных'}
+              <Help title="Состояние GPU">
+                Общая блокировка inference приложения: idle — свободно, running — вызов выполняется,
+                quarantined — исход предыдущего вызова неизвестен. Карантин не доказывает поломку
+                модели. Истечение lease и отмена задачи не доказывают физическую остановку
+                вычисления. Fencing token защищает от поздних ответов старого worker.
+              </Help>
+            </h3>
             {data.gpu?.state === 'quarantined' && (
               <>
                 <p>
@@ -70,6 +95,7 @@ export function AdminQueues() {
                 </p>
                 <Input
                   label="Причина восстановления"
+                  info="Пояснение попадёт в аудит вместе с новым fencing token. Укажите, как проверили завершение прежнего запроса. Восстановление разрешает следующий вызов; оно не останавливает старое вычисление."
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
                 />
@@ -80,6 +106,12 @@ export function AdminQueues() {
                     onChange={(e) => setStopped(e.target.checked)}
                   />{' '}
                   Я проверил, что процесс инференса остановлен
+                  <Help title="Подтверждение остановки inference">
+                    Проверьте завершение или остановку прежнего физического запроса на
+                    inference-сервере. Ответ сервера на ping и отсутствие задачи в интерфейсе
+                    недостаточны. Это подтверждение позволяет безопасно открыть слот для следующего
+                    единственного вызова.
+                  </Help>
                 </label>
                 <Button
                   variant="danger"

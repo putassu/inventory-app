@@ -10,6 +10,7 @@ from app.db.models import (
     Confirmation,
     Evidence,
     Item,
+    Media,
     Operation,
     Outbox,
     Proposal,
@@ -26,13 +27,15 @@ from app.domain.schemas import COMMANDS, Action
 
 LABELS = {
     "receive_stock": "Добавить вещь",
+    "verify_item": "Проверить вещь",
     "move_stock": "Переместить",
     "consume_stock": "Израсходовать",
     "set_quantity": "Установить остаток",
     "update_item": "Изменить карточку",
-    "update_lot": "Изменить партию",
+    "update_lot": "Изменить срок и сведения",
     "split_lot": "Разделить партию",
     "merge_lots": "Объединить партии",
+    "merge_items": "Объединить вещи",
     "create_location": "Создать место",
     "move_location": "Переместить место",
     "update_location": "Изменить место",
@@ -49,7 +52,7 @@ FIELD_LABELS = {
     "name": "Название",
     "item_mode": "Новая или существующая вещь",
     "item_id": "Карточка",
-    "lot_id": "Партия",
+    "lot_id": "Какие вещи",
     "location_id": "Место",
     "to_location_id": "Куда переместить",
     "quantity": "Количество",
@@ -77,6 +80,10 @@ FIELD_LABELS = {
     "model": "Модель",
     "user_description": "Описание",
     "generated_description": "Описание AI",
+    "ocr_text": "Полный текст OCR",
+    "source_item_id": "Исходная вещь",
+    "target_item_id": "Целевая вещь",
+    "target_location_id": "Место целевой вещи",
     "package_size": "Единиц в упаковке",
     "serial_number": "Серийный номер",
     "label": "Название партии",
@@ -101,11 +108,30 @@ class PersistedConflict(DomainError):
     """Сохранённая новая форма должна пережить HTTP 409."""
 
 
-def form_fields(actions, source):
+def form_fields(actions, source, item_fields=None):
+    from app.domain.item_fields import custom_form_fields
+
+    item_fields = item_fields or {}
     fields = []
     for action in actions:
         properties = COMMANDS[action["type"]].model_json_schema()["properties"]
         for key, value in action["values"].items():
+            if key == "custom_attributes":
+                fields.extend(custom_form_fields(action, item_fields))
+                continue
+            if (
+                key == "media_ids"
+                or action["type"] == "verify_item"
+                and key
+                in {
+                    "item_mode",
+                    "item_id",
+                    "lot_mode",
+                    "lot_id",
+                    "separate_item",
+                }
+            ):
+                continue
             if key == "attributes":
                 value = value if isinstance(value, dict) else {}
                 category = action["values"].get("category") or action["values"].get(
@@ -165,7 +191,7 @@ def form_fields(actions, source):
             variants = prop.get("anyOf", [prop])
             prop = next((p for p in variants if p.get("type") != "null"), prop)
             control = "text_input"
-            if key in {"location_id", "to_location_id", "parent_id", "transfer_to_id"}:
+            if key in {"location_id", "to_location_id", "parent_id", "transfer_to_id", "target_location_id"}:
                 control = "location_picker"
             elif key.endswith("_id") or key == "lot_ids":
                 control = "entity_picker"
@@ -194,9 +220,9 @@ def form_fields(actions, source):
                     "label": FIELD_LABELS.get(key, key),
                     "control": control,
                     "value_type": prop.get("type", "decimal"),
-                    "required": False,
+                    "required": action["type"] == "verify_item" and key == "item_name",
                     "editable": control != "readonly_summary",
-                    "allow_unknown": True,
+                    "allow_unknown": not (action["type"] == "verify_item" and key == "item_name"),
                     "options": [{"value": option, "label": option} for option in prop.get("enum", [])],
                     "validation": {"min": "0", "step": str(action["values"].get("quantity_step", "1"))}
                     if control in {"number_stepper", "decimal_input"}
@@ -208,7 +234,13 @@ def form_fields(actions, source):
                     else "secondary",
                 }
             )
-    return fields
+    return [
+        {
+            **field,
+            "hidden": field.get("hidden", False) or field["key"] in item_fields.get("hidden_fields", []),
+        }
+        for field in fields
+    ]
 
 
 async def normalize_actions(db, workspace_id, actions):
@@ -217,9 +249,21 @@ async def normalize_actions(db, workspace_id, actions):
     for raw in actions:
         action = Action.model_validate(raw).model_dump(mode="json")
         values = action["values"]
-        if action["type"] == "receive_stock":
+        for media_id in values.get("media_ids", []):
+            media = await scoped_get(db, Media, media_id, workspace_id)
+            require(
+                media.state == "uploaded" and media.kind == "source" and media.mime.startswith("image/"),
+                "INVALID_MEDIA",
+                "Выберите доступную фотографию.",
+                422,
+            )
+        if action["type"] in {"receive_stock", "verify_item"}:
             values["location_id"] = state.location(values["location_id"])["id"]
-            if values["item_mode"] == "create" and not values["item_name"]:
+            if (
+                action["type"] == "receive_stock"
+                and values["item_mode"] == "create"
+                and not values["item_name"]
+            ):
                 # Временное имя входит в сохранённую команду и больше не зависит от времени apply.
                 values["item_name"] = (
                     "Неопознанный предмет — " + utcnow().strftime("%Y-%m-%d %H:%M") + " · " + uid()[:8]
@@ -236,7 +280,7 @@ async def normalize_actions(db, workspace_id, actions):
                 values["unit_code"] = values["unit_code"] or item["base_unit_id"]
                 if item["privacy_policy"] == "local_only":
                     values["privacy_policy"] = "local_only"
-            if values["category"] == "document":
+            if values["category"] == "document" or values.get("ocr_text"):
                 values["privacy_policy"] = "local_only"
             if values["tracking_mode"] == "untracked":
                 values.update(quantity=None, quantity_state="not_applicable", unit_code=None)
@@ -244,6 +288,13 @@ async def normalize_actions(db, workspace_id, actions):
             item = state.get("item", values["item_id"])
             values.setdefault("primary_category", item["primary_category"])
             values.setdefault("attributes", item["attributes"])
+            values.setdefault("custom_attributes", item.get("custom_attributes", {}))
+            if (
+                values["primary_category"] == "document"
+                and item["primary_category"] != "document"
+                and "privacy_policy" not in values
+            ) or values.get("ocr_text", item.get("ocr_text")):
+                values["privacy_policy"] = "local_only"
         result.append(action)
     require(
         len({a["action_id"] for a in result}) == len(result),
@@ -305,7 +356,15 @@ async def rebuild(db, proposal, *, increment=False, issues=None):
     except DomainError as error:
         blockers.append({"code": error.code, "message": error.message, **error.details})
     proposal.dependencies = state.dependencies
-    if any(action["type"] in {"receive_stock", "split_lot", "update_lot"} for action in proposal.actions):
+    for action in proposal.actions:
+        if action["type"] == "merge_items":
+            for key in ("source_item_id", "target_item_id"):
+                item_id = action["values"][key]
+                proposal.dependencies["merge:" + item_id] = merge_membership(state.original, item_id)
+    if any(
+        action["type"] in {"receive_stock", "verify_item", "split_lot", "update_lot"}
+        for action in proposal.actions
+    ):
         proposal.dependencies = {
             **proposal.dependencies,
             "setting:expiry.month_expiry_policy": settings["expiry.month_expiry_policy"],
@@ -341,7 +400,7 @@ async def rebuild(db, proposal, *, increment=False, issues=None):
                 {"code": "DIAGNOSTIC_ONLY", "message": "Диагностический повтор нельзя применять к учёту."}
             )
     previews = {p["action_id"]: p for p in state.previews}
-    fields = form_fields(proposal.actions, proposal.source)
+    fields = form_fields(proposal.actions, proposal.source, state.settings.get("item_fields"))
     fields = [
         {
             **{key: decision[key] for key in ("action_id", "key", "label", "value", "options")},
@@ -405,7 +464,16 @@ async def rebuild(db, proposal, *, increment=False, issues=None):
         "actions": [{**a, "preview": previews.get(a["action_id"], {})} for a in proposal.actions],
         "form": {"template": proposal.actions[0]["type"] + ".v1", "fields": fields, "readonly_fields": []},
         "blocking_issues": blockers,
-        "warnings": proposal.warnings,
+        "warnings": [
+            warning
+            for warning in proposal.warnings
+            if not (
+                warning.startswith("Место из ввода не выбрано:")
+                and all((a["action_id"], "location_id") in chosen for a in proposal.actions)
+                or (warning.startswith("Найдены похожие вещи:") or "Выберите действие вручную" in warning)
+                and all((a["action_id"], "operation") in chosen for a in proposal.actions)
+            )
+        ],
         "media": media,
         "required_decisions": decisions,
         "available_actions": (["edit", "cancel"] if blockers else ["confirm", "edit", "cancel"])
@@ -429,8 +497,13 @@ async def rebuild(db, proposal, *, increment=False, issues=None):
 
 
 async def create_proposal(db, workspace_id, user_id, actions, *, task=None, source="manual", warnings=None):
+    proposal_id = uid()
+    if task:
+        from app.application.drafts import publish
+
+        actions = await publish(db, task, actions, proposal_id)
     proposal = Proposal(
-        id=uid(),
+        id=proposal_id,
         workspace_id=workspace_id,
         created_by=user_id,
         actions=actions,
@@ -440,7 +513,7 @@ async def create_proposal(db, workspace_id, user_id, actions, *, task=None, sour
         revision=1,
         review_hash="",
         source_proposals=[],
-        warnings=warnings or [],
+        warnings=[*(warnings or []), *((task.result or {}).get("catalog_warnings", []) if task else [])],
         user_changes=[],
     )
     db.add(proposal)
@@ -457,10 +530,33 @@ def apply_changes(proposal, changes):
     by_id = {a["action_id"]: a for a in actions}
     for change in changes:
         action = by_id.get(change["action_id"])
+        if change["key"].startswith("custom_attributes."):
+            key = change["key"].split(".")[1:]
+            require(
+                action
+                and action["type"] in {"receive_stock", "verify_item", "update_item"}
+                and action["values"].get("item_mode") != "existing"
+                and len(key) == 1
+                and any(
+                    f["action_id"] == action["action_id"] and f["key"] == change["key"]
+                    for f in proposal.document.get("form", {}).get("fields", [])
+                ),
+                "UNKNOWN_FIELD",
+                "Пользовательское поле недоступно в этой форме.",
+                422,
+            )
+            values = action["values"].setdefault("custom_attributes", {})
+            if values is None:
+                values = action["values"]["custom_attributes"] = {}
+            if change["value"] is None:
+                values.pop(key[0], None)
+            else:
+                values[key[0]] = change["value"]
+            continue
         if change["key"].startswith("attributes."):
             require(
                 action
-                and action["type"] in {"receive_stock", "update_item"}
+                and action["type"] in {"receive_stock", "verify_item", "update_item"}
                 and action["values"].get("item_mode") != "existing",
                 "UNKNOWN_FIELD",
                 "Для этой операции свойства карточки недоступны.",
@@ -519,7 +615,19 @@ def apply_changes(proposal, changes):
                 }
             continue
         require(
-            action and change["key"] in COMMANDS[action["type"]].model_fields,
+            action
+            and change["key"] in COMMANDS[action["type"]].model_fields
+            and not (
+                action["type"] == "verify_item"
+                and change["key"]
+                in {
+                    "item_id",
+                    "item_mode",
+                    "lot_id",
+                    "lot_mode",
+                    "separate_item",
+                }
+            ),
             "UNKNOWN_FIELD",
             "Поле не входит в схему действия.",
             422,
@@ -545,6 +653,12 @@ async def edit_proposal(db, proposal, expected_revision, changes):
     return await rebuild(db, proposal, increment=True)
 
 
+def merge_membership(rows, item_id):
+    lots = {row["id"]: row["version"] for row in rows["lot"].values() if row["item_id"] == item_id}
+    balances = {row["id"]: row["version"] for row in rows["balance"].values() if row["lot_id"] in lots}
+    return digest([lots, balances])
+
+
 async def dependencies_changed(db, proposal, expected=None, *, settings=None):
     for key, version in (expected or proposal.dependencies).items():
         require(":" in key, "INVALID_VERSION_KEY", "Неизвестная сущность версии.", 422)
@@ -559,6 +673,10 @@ async def dependencies_changed(db, proposal, expected=None, *, settings=None):
             if settings is None:
                 _, settings = await effective_settings(db)
             if settings[entity_id] != version:
+                return True
+        elif kind == "merge":
+            state = await load_state(db, proposal.workspace_id, proposal.created_by, {})
+            if merge_membership(state.original, entity_id) != version:
                 return True
         elif kind == "duplicate":
             action = next((a for a in proposal.actions if a["action_id"] == entity_id), None)
@@ -645,7 +763,7 @@ async def accept_confirmation(db, proposal, user_id, payload):
         await rebuild(db, proposal, increment=True)
     if not proposal.document["can_confirm"]:
         raise PersistedConflict(
-            "REVIEW_UPDATE_REQUIRED", "Устраните отмеченные поля.", review=proposal.document
+            "REVIEW_VALIDATION_FAILED", "Устраните отмеченные поля.", review=proposal.document
         )
     receipt = Receipt(
         id=uid(),
@@ -816,6 +934,41 @@ async def apply_confirmation(factory, confirmation_id, fencing_token=1):
             db.add(operation)
             await db.flush()
             await persist_state(db, state, operation.id)
+            # Архивация остановленной карточки исключает её воскрешение поздним ответом модели.
+            from app.application.tasks import ACTIVE, cancel_task
+
+            for item_id, item in state.rows["item"].items():
+                if (
+                    item["lifecycle"] != "active"
+                    and item.get("source_task_id")
+                    and state.original["item"].get(item_id, {}).get("lifecycle") == "active"
+                ):
+                    task = await db.get(Task, item["source_task_id"])
+                    if (
+                        task
+                        and task.status in ACTIVE | {"waiting_for_review"}
+                        and all(
+                            state.rows["item"].get(key, {}).get("lifecycle") != "active"
+                            for key in task.context.get("catalog_item_ids", [])
+                        )
+                    ):
+                        await cancel_task(db, task)
+            from app.application.photos import attach_photos
+
+            for action, preview in zip(confirmation.actions, state.previews, strict=True):
+                media_ids = action["values"].get("media_ids", [])
+                if media_ids:
+                    entity_type = (
+                        "location" if action["type"] in {"create_location", "update_location"} else "item"
+                    )
+                    await attach_photos(
+                        db,
+                        proposal.workspace_id,
+                        entity_type,
+                        preview[entity_type + "_id"],
+                        media_ids,
+                        settings,
+                    )
             confirmation.status = "applied"
             confirmation.result = {
                 "operation_id": operation.id,
@@ -842,6 +995,7 @@ async def apply_confirmation(factory, confirmation_id, fencing_token=1):
                 if row.task_id:
                     task = await scoped_get(db, Task, row.task_id, row.workspace_id)
                     transition(task, "succeeded", "saved")
+                    task.error_code = None
                     task.completed_at = utcnow()
                     # Материалы распознавания привязываются к подтверждённой карточке.
                     prefix = f"s{source_index - 1}_" if source_index else None

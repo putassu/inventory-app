@@ -1,3 +1,4 @@
+import { randomId } from '../utils/id'
 let accessToken = null
 let workspaceId = null
 let userId = null
@@ -63,7 +64,12 @@ async function refresh() {
         clearSession()
         listeners.forEach((listener) => listener())
       }
-      throw new ApiError('Не удалось восстановить сессию. Войдите повторно.', response.status)
+      throw new ApiError(
+        response.status === 401
+          ? 'Сессия завершена. Войдите повторно.'
+          : 'Не удалось связаться с сервером. Повторите попытку.',
+        response.status,
+      )
     }
     const payload = await response.json()
     if (generation !== current) throw new DOMException('Сессия изменена', 'AbortError')
@@ -92,7 +98,7 @@ export async function api(path, options = {}, retry = true) {
   if (signal?.aborted) controller.abort()
   requests.add(controller)
   const method = (rest.method || 'GET').toUpperCase()
-  const requestKey = key || (!['GET', 'HEAD'].includes(method) ? crypto.randomUUID() : undefined)
+  const requestKey = key || (!['GET', 'HEAD'].includes(method) ? randomId() : undefined)
   const headers = new Headers(rest.headers)
   if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`)
   if (workspaceId) headers.set('X-Workspace-ID', workspaceId)
@@ -116,19 +122,22 @@ export async function api(path, options = {}, retry = true) {
     if (!response.ok && response.status !== 304) {
       const payload = await response.json().catch(() => ({}))
       const error = payload.error || {}
+      const review = error.review || error.details?.review
+      const issues = review?.blocking_issues?.map((issue) => issue.message).filter(Boolean) || []
       const fields = Array.isArray(error.field_errors)
         ? Object.fromEntries(
             error.field_errors.map((f, i) => [f.key || f.path || i, f.message || f.code]),
           )
         : error.field_errors
       throw new ApiError(
-        error.message || `Запрос не выполнен (${response.status}).`,
+        [...new Set([error.message, ...issues].filter(Boolean))].join(' ') ||
+          `Запрос не выполнен (${response.status}).`,
         response.status,
         {
           details: error.details,
           fields,
           code: error.code,
-          review: error.review || error.details?.review,
+          review,
           requestId: error.request_id || response.headers.get('X-Request-ID'),
           retryAfter: response.headers.get('Retry-After'),
         },
@@ -139,13 +148,19 @@ export async function api(path, options = {}, retry = true) {
     if (generation !== current || controller.signal.aborted)
       throw new DOMException('Сессия изменена', 'AbortError')
     return result
+  } catch (cause) {
+    if (cause instanceof TypeError)
+      throw new ApiError('Нет связи с сервером. Проверьте подключение и повторите попытку.', 0, {
+        code: 'NETWORK_ERROR',
+      })
+    throw cause
   } finally {
     requests.delete(controller)
     signal?.removeEventListener('abort', abort)
   }
 }
 
-export const write = (path, body, method = 'POST', key = crypto.randomUUID()) =>
+export const write = (path, body, method = 'POST', key = randomId()) =>
   api(path, { method, body, key })
 export async function restoreSession() {
   await refreshOnce()

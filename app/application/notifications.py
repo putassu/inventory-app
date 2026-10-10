@@ -202,11 +202,14 @@ async def plan_workspace(factory, workspace_id, now=None):
                     line = f"{item.name}: {'срок истёк' if expired else 'годен до'} {lot.effective_expiry_on.isoformat()}"
                     if unknown:
                         line += "; наличие не подтверждено"
+                    if item.review_status != "confirmed":
+                        line += "; карточка не подтверждена"
                     lines.append(line)
                     subjects.append(
                         {
                             "lot_id": lot.id,
                             "item_id": item.id,
+                            "review_status": item.review_status,
                             "expiry_on": lot.effective_expiry_on.isoformat(),
                             "generation": occurrence.generation,
                         }

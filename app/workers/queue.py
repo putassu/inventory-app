@@ -65,6 +65,10 @@ async def outbox_job(ctx, event_id):
             and aware(event.lease_until) > utcnow()
         ):
             return
+        if event.event_type in {"index_item", "maintenance", "plan_reminders"}:
+            control = await db.get(Control, "queue:maintenance")
+            if control and control.value.get("paused"):
+                return
         event.lease_owner, event.lease_until = owner, utcnow() + timedelta(minutes=10)
         event.attempts += 1
         kind, entity_id, workspace_id, payload = (
@@ -284,8 +288,16 @@ class MLWorker:
     max_tries = 1
 
 
-class CloudWorker(MLWorker):
+class CloudWorker:
+    # arq читает __dict__ класса и не учитывает унаследованные обработчики.
+    functions = [run_ml_stage]
+    on_startup = ml_startup
+    redis_settings = RedisSettings.from_dsn(get_config().redis_url)
     queue_name = "inventory:cloud"
+    max_jobs = 1
+    job_timeout = 1500
+    keep_result = 0
+    max_tries = 1
 
 
 class Scheduler:

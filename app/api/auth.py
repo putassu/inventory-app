@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from pydantic import Field
 from sqlalchemy import select, update
 
-from app.api.deps import current_auth, current_user, database, idempotency_key
+from app.api.deps import current_auth, current_user, db_session, idempotency_key
 from app.application import auth
 from app.application.idempotency import previous_response, remember
 from app.config import get_config
@@ -54,7 +54,7 @@ def token_response(request, response, result, client_type):
 
 
 @router.post("/auth/login")
-async def login(data: Login, request: Request, response: Response, db=Depends(database)):
+async def login(data: Login, request: Request, response: Response, db=db_session):
     if data.client_type == "web":
         csrf_check(request)
     result = await auth.login(
@@ -64,7 +64,7 @@ async def login(data: Login, request: Request, response: Response, db=Depends(da
 
 
 @router.post("/auth/refresh")
-async def refresh(data: Refresh, request: Request, response: Response, db=Depends(database)):
+async def refresh(data: Refresh, request: Request, response: Response, db=db_session):
     cookie = request.cookies.get("inventory_refresh")
     if cookie or data.client_type == "web":
         csrf_check(request)
@@ -74,9 +74,7 @@ async def refresh(data: Refresh, request: Request, response: Response, db=Depend
 
 
 @router.post("/auth/logout")
-async def logout(
-    request: Request, response: Response, authentication=Depends(current_auth), db=Depends(database)
-):
+async def logout(request: Request, response: Response, authentication=Depends(current_auth), db=db_session):
     if request.cookies.get("inventory_refresh"):
         csrf_check(request)
     authentication[1].revoked_at = utcnow()
@@ -85,7 +83,7 @@ async def logout(
 
 
 @router.post("/auth/logout-all")
-async def logout_all(user=Depends(current_user), db=Depends(database)):
+async def logout_all(user=Depends(current_user), db=db_session):
     locked = await db.get(User, user.id, with_for_update=True)
     locked.auth_version += 1
     await db.execute(update(Session).where(Session.user_id == user.id).values(revoked_at=utcnow()))
@@ -93,7 +91,7 @@ async def logout_all(user=Depends(current_user), db=Depends(database)):
 
 
 @router.get("/workspaces")
-async def workspaces(user=Depends(current_user), db=Depends(database)):
+async def workspaces(user=Depends(current_user), db=db_session):
     rows = (
         await db.scalars(
             select(Workspace)
@@ -110,7 +108,7 @@ async def workspaces(user=Depends(current_user), db=Depends(database)):
 
 
 @router.get("/me")
-async def me(user=Depends(current_user), db=Depends(database)):
+async def me(user=Depends(current_user), db=db_session):
     agreements = (await db.scalars(select(Agreement).where(Agreement.user_id == user.id))).all()
     return {
         "id": user.id,
@@ -131,7 +129,7 @@ class ProfileUpdate(StrictModel):
 
 
 @router.patch("/me")
-async def update_me(data: ProfileUpdate, user=Depends(current_user), db=Depends(database)):
+async def update_me(data: ProfileUpdate, user=Depends(current_user), db=db_session):
     user = await db.get(User, user.id, with_for_update=True, populate_existing=True)
     require(user.version == data.expected_version, "VERSION_CONFLICT", "Профиль уже изменился.")
     if data.timezone:
@@ -153,7 +151,7 @@ class AgreementInput(StrictModel):
 
 @router.post("/me/agreements")
 async def agreement(
-    data: AgreementInput, key=Depends(idempotency_key), user=Depends(current_user), db=Depends(database)
+    data: AgreementInput, key=Depends(idempotency_key), user=Depends(current_user), db=db_session
 ):
     await db.get(User, user.id, with_for_update=True)
     body = data.model_dump()

@@ -3,6 +3,9 @@ import { api, write } from '../api/client'
 import { Input } from './ui/Input'
 import { Select } from './ui/Select'
 import { Button } from './ui/Button'
+import { label } from '../utils/labels'
+import { Help } from './ui/Help'
+import { settingExplanation } from '../utils/settingsHelp'
 export function SettingsPanel({ admin = false }) {
   const prefix = admin ? '/admin/settings' : '/settings'
   const [definition, setDefinition] = useState([])
@@ -31,7 +34,8 @@ export function SettingsPanel({ admin = false }) {
   }, [prefix])
   function change(field, raw) {
     let value = raw
-    if (field.type === 'int' || field.type === 'float') value = raw === '' ? null : Number(raw)
+    if (raw === '' && field.nullable) value = null
+    else if (field.type === 'int' || field.type === 'float') value = raw === '' ? null : Number(raw)
     setChanges((previous) => ({ ...previous, [field.key]: value }))
     setPreview(null)
     setImpact(false)
@@ -93,37 +97,73 @@ export function SettingsPanel({ admin = false }) {
                 ? changes[field.key]
                 : (current.desired || current.values)[field.key]
               const title = field.description_ru || field.key
+              const info = (
+                <>
+                  <p>{settingExplanation(field)}</p>
+                  <p>
+                    <code>{field.key}</code> ·{' '}
+                    {field.scope === 'user' ? 'Для пользователя' : 'Для всего сервера'}
+                  </p>
+                  <p>
+                    По умолчанию:{' '}
+                    {field.default == null ? 'не задано' : JSON.stringify(field.default)}.
+                    {field.min != null && ` Минимум: ${field.min}.`}
+                    {field.max != null && ` Максимум: ${field.max}.`}
+                    {field.nullable && ' Пустое значение допустимо.'}
+                  </p>
+                  {admin && (
+                    <p>
+                      Применение:{' '}
+                      {field.apply_mode === 'requires_restart'
+                        ? 'после перезапуска соответствующего компонента'
+                        : field.apply_mode === 'immediate'
+                          ? 'сразу после сохранения'
+                          : 'для новых задач; уже созданные используют свой снимок настроек'}
+                      .
+                    </p>
+                  )}
+                  {field.disabled_reason && <p>{field.disabled_reason}</p>}
+                </>
+              )
               return (
                 <div key={field.key}>
                   {field.type === 'bool' ? (
-                    <label className="check">
-                      <input
-                        type="checkbox"
-                        disabled={busy || field.editable === false}
-                        checked={!!value}
-                        onChange={(event) => change(field, event.target.checked)}
-                      />
-                      {title}
-                    </label>
+                    <div className="field-label">
+                      <label className="check">
+                        <input
+                          type="checkbox"
+                          disabled={busy || field.editable === false}
+                          checked={!!value}
+                          onChange={(event) => change(field, event.target.checked)}
+                        />
+                        {title}
+                      </label>
+                      <Help title={title}>{info}</Help>
+                    </div>
                   ) : field.enum?.length ? (
                     <Select
                       label={title}
+                      info={info}
                       value={value ?? ''}
                       disabled={busy || field.editable === false}
                       onChange={(event) => change(field, event.target.value)}
                     >
+                      {field.nullable && <option value="">Не задано</option>}
                       {field.enum.map((option) => (
                         <option key={option} value={option}>
-                          {option}
+                          {label(option)}
                         </option>
                       ))}
                     </Select>
                   ) : (
                     <Input
                       label={title}
+                      info={info}
                       value={value ?? ''}
                       type={['int', 'float'].includes(field.type) ? 'number' : 'text'}
                       step={field.type === 'int' ? '1' : 'any'}
+                      min={field.min ?? undefined}
+                      max={field.max ?? undefined}
                       disabled={busy || field.editable === false}
                       onChange={(event) => change(field, event.target.value)}
                     />
@@ -146,6 +186,7 @@ export function SettingsPanel({ admin = false }) {
           {admin && (
             <Input
               label="Причина изменения"
+              info="Обязательное пояснение для журнала администратора. Вместе с изменениями сохраняется ревизия: это позволяет понять причину настройки и выполнить осознанный откат. Секреты в причину не вводите."
               value={reason}
               onChange={(event) => {
                 setReason(event.target.value)
@@ -167,6 +208,11 @@ export function SettingsPanel({ admin = false }) {
                     onChange={(event) => setImpact(event.target.checked)}
                   />
                   Подтверждаю сокращение сроков хранения: {preview.retention_reduced.join(', ')}
+                  <Help title="Сокращение сроков хранения">
+                    После применения очередная очистка может удалить данные, которые попадут под
+                    новый, более короткий срок. Предпросмотр показывает влияние изменения; откат
+                    настройки не восстановит уже удалённые файлы.
+                  </Help>
                 </label>
               )}
             </div>

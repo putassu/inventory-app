@@ -8,7 +8,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
 from sqlalchemy import select, update
 
-from app.config import get_config
+from app.config import get_config, local_enabled, model_definitions
 from app.db.models import (
     Agreement,
     Control,
@@ -70,26 +70,15 @@ async def bootstrap(db, login, password, timezone="Europe/Moscow"):
         ]
     )
     config = get_config()
-    for name, model, endpoint, trust in [
-        ("local_vlm", config.local_model, "ollama", "local"),
-        ("privacy_asr", config.local_model, "ollama", "local"),
-        ("embeddings", config.embedding_model, "ollama", "local"),
-        ("local_audio", config.local_audio_model or "unconfigured", "local_audio", "local"),
-        ("cloud_primary", config.cloud_model or "unconfigured", "cloud", "external"),
-    ]:
+    for name, model, endpoint, trust, credential in model_definitions(config):
         db.add(
             ModelDeployment(
                 logical_name=name,
                 actual_model_id=model,
                 endpoint_ref=endpoint,
                 trust_domain=trust,
-                enabled=trust == "local"
-                and (name != "local_audio" or config.local_audio_trusted and config.local_audio_verified),
-                credential_ref="cloud_key"
-                if trust == "external"
-                else "local_audio_key"
-                if name == "local_audio"
-                else None,
+                enabled=trust == "local" and local_enabled(config, endpoint),
+                credential_ref=credential,
             )
         )
     return {"user_id": user.id, "workspace_id": workspace.id}

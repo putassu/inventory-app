@@ -4,6 +4,7 @@ import { Button } from '../ui/Button'
 import { Input } from '../ui/Input'
 import { Select } from '../ui/Select'
 import { useToast } from '../../contexts/ToastContext'
+import { displayDecimal, formatBalance, unitLabel } from '../../utils/quantity'
 import {
   consumeStock,
   moveStock,
@@ -34,12 +35,10 @@ function Form({
         ?.location_id ||
       '',
   )
-  const [toLocationId, setToLocationId] = useState(
-    locations.find((row) => row.id !== initialBalance?.location_id)?.id || '',
-  )
-  const [quantity, setQuantityVal] = useState(initialBalance?.quantity ?? '1')
+  const [toLocationId, setToLocationId] = useState('')
+  const [quantity, setQuantityVal] = useState(displayDecimal(initialBalance?.quantity ?? '1'))
   const [quantityState, setQuantityState] = useState(initialBalance?.quantity_state || 'exact')
-  const [wholePresence, setWholePresence] = useState(false)
+  const [wholePresence, setWholePresence] = useState(initialBalance?.quantity == null)
   const [reason, setReason] = useState(operation === 'consume' ? 'Расход' : 'Корректировка')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -47,10 +46,19 @@ function Form({
   const lots = item?.lots || []
   const balances = item?.balances || []
 
-  // Find relevant balance for the selected lot and location
+  // Остаток относится к конкретной партии и месту.
   const currentBalance = balances.find(
     (b) => b.lot_id === selectedLotId && b.location_id === selectedLocationId,
   )
+  function selectSource(lotId, locationId) {
+    const balance = balances.find((row) => row.lot_id === lotId && row.location_id === locationId)
+    setSelectedLotId(lotId)
+    setSelectedLocationId(locationId)
+    setQuantityVal(displayDecimal(balance?.quantity ?? ''))
+    setQuantityState(balance?.quantity_state || 'exact')
+    setWholePresence(balance?.quantity == null)
+    if (locationId === toLocationId) setToLocationId('')
+  }
 
   const titles = {
     consume: 'Списание / Расход',
@@ -130,6 +138,10 @@ function Form({
       if (onSuccess) onSuccess(result)
       onClose()
     } catch (err) {
+      if (err.pending) {
+        onClose()
+        return
+      }
       let errMsg = err.message || 'Ошибка выполнения операции'
       if (err.fields) {
         errMsg += ` (${Object.entries(err.fields)
@@ -169,6 +181,7 @@ function Form({
         <fieldset disabled={isLoading} className="page-stack">
           {error && (
             <div
+              role="alert"
               style={{
                 padding: 'var(--space-3)',
                 backgroundColor: 'rgba(239, 68, 68, 0.1)',
@@ -188,28 +201,30 @@ function Form({
 
           {lots.length > 1 && (
             <Select
-              label="Партия"
+              label="Какие вещи"
               value={selectedLotId}
               onChange={(e) => {
-                setSelectedLotId(e.target.value)
-                setSelectedLocationId(
+                selectSource(
+                  e.target.value,
                   balances.find((balance) => balance.lot_id === e.target.value)?.location_id || '',
                 )
               }}
             >
-              {lots.map((lot) => (
-                <option key={lot.id} value={lot.id}>
-                  {lot.label ||
-                    `Партия от ${lot.acquired_at || lot.created_at?.slice(0, 10) || lot.id.slice(0, 8)}`}
-                </option>
-              ))}
+              {lots
+                .filter((lot) => !lot.archived_at)
+                .map((lot) => (
+                  <option key={lot.id} value={lot.id}>
+                    {lot.label ||
+                      `Добавлено ${lot.acquired_at || lot.created_at?.slice(0, 10) || ''} · срок ${lot.expiry_on || 'не указан'}`}
+                  </option>
+                ))}
             </Select>
           )}
 
           <Select
             label="Исходное место хранения"
             value={selectedLocationId}
-            onChange={(e) => setSelectedLocationId(e.target.value)}
+            onChange={(e) => selectSource(selectedLotId, e.target.value)}
           >
             {locations
               .filter((loc) =>
@@ -237,9 +252,7 @@ function Form({
             >
               <span>Текущий остаток в месте:</span>
               <strong>
-                {currentBalance.quantity_state === 'unknown'
-                  ? 'Неизвестно'
-                  : `${currentBalance.quantity} ${currentBalance.unit_code || item?.base_unit_id || 'шт.'}`}
+                {formatBalance(currentBalance, item?.base_unit_id, item?.attributes?.counting_unit)}
               </strong>
             </div>
           )}
@@ -274,9 +287,10 @@ function Form({
                 <input
                   type="checkbox"
                   checked={wholePresence}
+                  disabled={currentBalance?.quantity == null}
                   onChange={(e) => setWholePresence(e.target.checked)}
                 />
-                Переместить весь остаток целиком (whole presence)
+                Переместить весь остаток целиком
               </label>
             </>
           )}
@@ -287,10 +301,15 @@ function Form({
               value={quantityState}
               onChange={(e) => setQuantityState(e.target.value)}
             >
-              <option value="exact">Точное число (exact)</option>
-              <option value="estimated">Примерное количество (estimated)</option>
-              <option value="unknown">Неизвестно (unknown)</option>
-              <option value="not_applicable">Учёт присутствия (not_applicable)</option>
+              {item?.tracking_mode === 'untracked' ? (
+                <option value="not_applicable">Учёт присутствия</option>
+              ) : (
+                <>
+                  <option value="exact">Точное количество</option>
+                  <option value="estimated">Примерное количество</option>
+                  <option value="unknown">Неизвестно</option>
+                </>
+              )}
             </Select>
           )}
 
@@ -300,7 +319,7 @@ function Form({
             (operation === 'set_quantity' && ['unknown', 'not_applicable'].includes(quantityState))
           ) && (
             <Input
-              label={`Количество (${item?.base_unit_id || 'шт.'})`}
+              label={`Количество (${unitLabel(item?.base_unit_id) || 'шт.'})`}
               type="text"
               inputMode="decimal"
               value={quantity}

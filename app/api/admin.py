@@ -7,7 +7,7 @@ from pydantic import Field
 from sqlalchemy import func, select
 
 from app.api.catalog import page, serialize
-from app.api.deps import admin_user, current_user, database, idempotency_key, scope, write_scope
+from app.api.deps import admin_user, current_user, db_session, idempotency_key, scope, write_scope
 from app.application.idempotency import previous_response, remember
 from app.application.settings import apply_settings, effective_settings, settings_view, validate_change
 from app.config import get_config
@@ -53,12 +53,12 @@ async def admin_schema(user=Depends(admin_user)):
 
 
 @router.get("/admin/settings")
-async def admin_settings(user=Depends(admin_user), db=Depends(database)):
+async def admin_settings(user=Depends(admin_user), db=db_session):
     return await settings_view(db)
 
 
 @router.post("/admin/settings/validate")
-async def validate(data: SettingsPatch, user=Depends(admin_user), db=Depends(database)):
+async def validate(data: SettingsPatch, user=Depends(admin_user), db=db_session):
     result = await validate_change(db, data.expected_revision, [c.model_dump() for c in data.changes])
     if result["retention_reduced"]:
         from app.application.maintenance import retention_impact
@@ -70,7 +70,7 @@ async def validate(data: SettingsPatch, user=Depends(admin_user), db=Depends(dat
 
 @router.patch("/admin/settings")
 async def change_settings(
-    data: SettingsPatch, key=Depends(idempotency_key), user=Depends(admin_user), db=Depends(database)
+    data: SettingsPatch, key=Depends(idempotency_key), user=Depends(admin_user), db=db_session
 ):
     await db.get(Control, "settings", with_for_update=True)
     body = data.model_dump(mode="json")
@@ -84,7 +84,7 @@ async def change_settings(
 
 
 @router.get("/admin/settings/history")
-async def settings_history(user=Depends(admin_user), db=Depends(database)):
+async def settings_history(user=Depends(admin_user), db=db_session):
     rows = (
         await db.scalars(select(SettingsRevision).order_by(SettingsRevision.revision.desc()).limit(100))
     ).all()
@@ -98,9 +98,7 @@ class Rollback(StrictModel):
 
 
 @router.post("/admin/settings/rollback")
-async def rollback(
-    data: Rollback, key=Depends(idempotency_key), user=Depends(admin_user), db=Depends(database)
-):
+async def rollback(data: Rollback, key=Depends(idempotency_key), user=Depends(admin_user), db=db_session):
     await db.get(Control, "settings", with_for_update=True)
     body = data.model_dump()
     cached = await previous_response(db, user.id, "admin", "rollback", key, body)
@@ -136,7 +134,7 @@ class Preferences(StrictModel):
 
 
 @router.patch("/settings")
-async def save_preferences(data: Preferences, user=Depends(current_user), db=Depends(database)):
+async def save_preferences(data: Preferences, user=Depends(current_user), db=db_session):
     user = await db.get(User, user.id, with_for_update=True, populate_existing=True)
     require(
         user.preferences_version == data.expected_version, "VERSION_CONFLICT", "Настройки уже изменились."
@@ -148,7 +146,7 @@ async def save_preferences(data: Preferences, user=Depends(current_user), db=Dep
 
 
 @router.get("/admin/models")
-async def models(user=Depends(admin_user), db=Depends(database)):
+async def models(user=Depends(admin_user), db=db_session):
     return {
         "items": [
             serialize(m)
@@ -164,7 +162,7 @@ class ModelPatch(StrictModel):
 
 
 @router.patch("/admin/models/{model_id}")
-async def update_model(model_id: UUID, data: ModelPatch, user=Depends(admin_user), db=Depends(database)):
+async def update_model(model_id: UUID, data: ModelPatch, user=Depends(admin_user), db=db_session):
     row = await db.get(ModelDeployment, str(model_id), with_for_update=True)
     require(row, "NOT_FOUND", "Deployment не найден.", 404)
     require(row.version == data.expected_version, "VERSION_CONFLICT", "Deployment уже изменён.")
@@ -188,14 +186,26 @@ async def model_health(
     request: Request,
     key=Depends(idempotency_key),
     user=Depends(admin_user),
-    db=Depends(database),
+    db=db_session,
 ):
     row = await db.get(ModelDeployment, str(model_id))
     require(row, "NOT_FOUND", "Deployment не найден.", 404)
     model, endpoint, trust, version = row.actual_model_id, row.endpoint_ref, row.trust_domain, row.version
+    logical_name = row.logical_name
     user_id = user.id
     await db.commit()
-    if endpoint == "local_audio":
+    if endpoint in {"local_audio", "litellm"} and logical_name == "privacy_asr":
+        from app.infrastructure.gpu import gpu_session
+
+        _, values = await effective_settings(db)
+        await db.commit()
+        async with gpu_session(request.app.state.session_factory) as slot:
+            require(slot is not None, "GPU_BUSY", "Дождитесь завершения текущей обработки.", 409)
+            await LocalAdapter(endpoint=endpoint).infer(
+                'Return JSON {"ok":true}.', {}, {**values, "model.output_budget": 256}, model=model
+            )
+        capabilities = {"verified_connection": True, "modalities": ["text"], "image_verified": False}
+    elif logical_name == "local_audio":
         import io
         import wave
 
@@ -218,11 +228,11 @@ async def model_health(
             "supports_combined_audio_image": False,
         }
     elif trust == "local":
-        capabilities = await LocalAdapter().capabilities(model)
+        capabilities = await LocalAdapter(endpoint=endpoint).capabilities(model)
     else:
         config = get_config()
         require(
-            config.cloud_url and config.cloud_model and config.cloud_key.get_secret_value(),
+            config.cloud_configured,
             "MODEL_NOT_CONFIGURED",
             "Задайте параметры LiteLLM в окружении.",
             503,
@@ -232,9 +242,9 @@ async def model_health(
 
         _, values = await effective_settings(db)
         await CloudAdapter().infer(
-            'Return JSON {"ok":true}.',
+            'Return only JSON {"ok":true}.',
             {"health_check": True},
-            values,
+            {**values, "model.output_budget": min(256, values["model.output_budget"])},
             policy="cloud_allowed",
             external_enabled=True,
         )
@@ -248,7 +258,7 @@ async def model_health(
 
 
 @router.get("/admin/queues")
-async def queues(user=Depends(admin_user), db=Depends(database)):
+async def queues(user=Depends(admin_user), db=db_session):
     counts = (
         await db.execute(
             select(Task.queue_class, Task.status, func.count()).group_by(Task.queue_class, Task.status)
@@ -278,7 +288,7 @@ async def queue_action(
     action: Literal["pause", "resume"],
     key=Depends(idempotency_key),
     user=Depends(admin_user),
-    db=Depends(database),
+    db=db_session,
 ):
     await db.get(Control, "settings", with_for_update=True)
     control = await db.get(Control, "queue:" + name)
@@ -298,7 +308,7 @@ class GPURecovery(StrictModel):
 
 @router.post("/admin/gpu/recover")
 async def recover_gpu(
-    data: GPURecovery, key=Depends(idempotency_key), user=Depends(admin_user), db=Depends(database)
+    data: GPURecovery, key=Depends(idempotency_key), user=Depends(admin_user), db=db_session
 ):
     slot = await db.get(GPUSlot, 1, with_for_update=True)
     require(
@@ -321,7 +331,7 @@ async def recover_gpu(
 
 
 @router.get("/admin/tasks/{task_id}/trace")
-async def trace(task_id: UUID, user=Depends(admin_user), selected=Depends(scope), db=Depends(database)):
+async def trace(task_id: UUID, user=Depends(admin_user), selected=Depends(scope), db=db_session):
     task = await scoped_get(db, Task, task_id, selected.workspace_id)
     attempts = (
         await db.scalars(select(Attempt).where(Attempt.task_id == task.id).order_by(Attempt.created_at))
@@ -345,7 +355,7 @@ async def replay(
     key=Depends(idempotency_key),
     user=Depends(admin_user),
     selected=Depends(write_scope),
-    db=Depends(database),
+    db=db_session,
 ):
     from app.application.tasks import create_task, task_view
 
@@ -370,8 +380,8 @@ async def replay(
             "privacy": {"force_local": True},
         },
         parent_task_id=task.id,
+        diagnostics_only=True,
     )
-    child.context = {**child.context, "diagnostics_only": True}
     db.add(Audit(actor_id=user.id, action="task.replay", details={"source": task.id, "task_id": child.id}))
     return remember(db, user.id, selected.workspace_id, f"replay:{task_id}", key, {}, task_view(child))
 
@@ -381,7 +391,7 @@ async def reindex(
     key=Depends(idempotency_key),
     user=Depends(admin_user),
     selected=Depends(write_scope),
-    db=Depends(database),
+    db=db_session,
 ):
     cached = await previous_response(db, user.id, selected.workspace_id, "reindex", key, {})
     if cached:
@@ -404,7 +414,7 @@ async def reindex(
 
 
 @router.get("/admin/jobs/{job_id}")
-async def job_status(job_id: UUID, user=Depends(admin_user), selected=Depends(scope), db=Depends(database)):
+async def job_status(job_id: UUID, user=Depends(admin_user), selected=Depends(scope), db=db_session):
     row = await scoped_get(db, Job, job_id, selected.workspace_id)
     return {
         "job_id": row.id,
@@ -415,7 +425,7 @@ async def job_status(job_id: UUID, user=Depends(admin_user), selected=Depends(sc
 
 
 @router.post("/admin/gc/preview")
-async def gc_preview(user=Depends(admin_user), db=Depends(database)):
+async def gc_preview(user=Depends(admin_user), db=db_session):
     _, settings = await effective_settings(db)
     from app.db.models import Binding
 
@@ -437,9 +447,7 @@ async def gc_preview(user=Depends(admin_user), db=Depends(database)):
 
 
 @router.post("/admin/gc/run")
-async def gc_run(
-    request: Request, key=Depends(idempotency_key), user=Depends(admin_user), db=Depends(database)
-):
+async def gc_run(request: Request, key=Depends(idempotency_key), user=Depends(admin_user), db=db_session):
     from app.application.maintenance import regular_cleanup
 
     result = await regular_cleanup(request.app.state.session_factory, force=True)
@@ -452,13 +460,13 @@ async def audit(
     limit: int = Query(50, ge=1, le=100),
     cursor: str | None = None,
     user=Depends(admin_user),
-    db=Depends(database),
+    db=db_session,
 ):
     return await page(db, select(Audit), Audit, limit, cursor)
 
 
 @router.get("/admin/metrics")
-async def metrics(user=Depends(admin_user), db=Depends(database)):
+async def metrics(user=Depends(admin_user), db=db_session):
     counts = dict((await db.execute(select(Task.status, func.count()).group_by(Task.status))).all())
     outbox = dict((await db.execute(select(Outbox.status, func.count()).group_by(Outbox.status))).all())
     return {
@@ -473,25 +481,31 @@ async def metrics(user=Depends(admin_user), db=Depends(database)):
 
 
 @router.get("/admin/health")
-async def health(user=Depends(admin_user), db=Depends(database)):
+async def health(user=Depends(admin_user), db=db_session):
     import asyncio
 
     import httpx
     from redis.asyncio import Redis
 
+    from app.infrastructure.workers import processing_health
+
     config = get_config()
 
-    async def probe(url):
+    async def probe(url, headers=None):
         try:
             async with httpx.AsyncClient(timeout=3, trust_env=False) as client:
-                return (await client.get(url)).is_success
+                return (await client.get(url, headers=headers)).is_success
         except Exception:
             return False
 
-    qdrant, minio, ollama = await asyncio.gather(
+    from app.infrastructure.models import gateway_headers
+
+    qdrant, minio, model_api = await asyncio.gather(
         probe(config.qdrant_url + "/healthz"),
         probe(config.s3_endpoint + "/minio/health/ready"),
-        probe(config.ollama_url + "/api/tags"),
+        probe(config.litellm_url.rstrip("/") + "/models", gateway_headers(config))
+        if config.litellm_url
+        else probe(config.ollama_url + "/api/tags"),
     )
     redis = Redis.from_url(config.redis_url, socket_connect_timeout=3, socket_timeout=3)
     try:
@@ -500,11 +514,15 @@ async def health(user=Depends(admin_user), db=Depends(database)):
         redis_ok = False
     finally:
         await redis.aclose()
+    processing = await processing_health(db)
     return {
         "postgres": True,
         "redis": redis_ok,
+        "scheduler": processing["workers"]["scheduler"],
+        "cpu_worker": processing["workers"]["cpu"],
+        "ml_worker": processing["workers"]["ml"],
         "qdrant": qdrant,
         "storage": minio if config.storage_backend == "s3" else True,
-        "ollama": ollama,
-        "external_configured": bool(config.cloud_url and config.cloud_key.get_secret_value()),
+        "litellm" if config.litellm_url else "ollama": model_api,
+        "external_configured": config.cloud_configured,
     }

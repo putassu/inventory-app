@@ -12,6 +12,7 @@ import { ThemeProvider } from './contexts/ThemeContext'
 import { TaskProvider } from './contexts/TaskContext'
 import { NotificationProvider } from './contexts/NotificationContext'
 import { Layout } from './components/Layout'
+import { Button } from './components/ui/Button'
 import { Login } from './pages/Login'
 import { Items } from './pages/Items'
 import { ItemDetail } from './pages/ItemDetail'
@@ -36,7 +37,7 @@ import { AdminMaintenance } from './pages/admin/AdminMaintenance'
 import { TaskTrace } from './pages/admin/TaskTrace'
 
 function ProtectedRoute({ children }) {
-  const { user, isLoading } = useAuth()
+  const { user, isLoading, sessionError } = useAuth()
   const location = useLocation()
 
   if (isLoading) {
@@ -54,6 +55,15 @@ function ProtectedRoute({ children }) {
       </div>
     )
   }
+
+  if (sessionError && !user)
+    return (
+      <main className="page-stack card">
+        <h1>Сервер недоступен</h1>
+        <p role="alert">{sessionError}</p>
+        <Button onClick={() => window.location.reload()}>Повторить загрузку</Button>
+      </main>
+    )
 
   if (!user) {
     return (
@@ -74,13 +84,27 @@ function WorkspaceProviders({ children }) {
   )
 }
 
+function RouteError() {
+  return (
+    <main className="page-stack card">
+      <h1>Не удалось открыть страницу</h1>
+      <p role="alert">
+        Попробуйте загрузить её ещё раз. Уже подтверждённые изменения сохранены на сервере.
+      </p>
+      <Button onClick={() => window.location.reload()}>Повторить загрузку</Button>
+      <a href="/items">Открыть каталог</a>
+    </main>
+  )
+}
+
 const router = createBrowserRouter(
   createRoutesFromElements(
     <>
-      <Route path="/login" element={<Login />} />
+      <Route path="/login" element={<Login />} errorElement={<RouteError />} />
 
       <Route
         path="/"
+        errorElement={<RouteError />}
         element={
           <ProtectedRoute>
             <WorkspaceProviders>

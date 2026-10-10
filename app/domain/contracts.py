@@ -15,6 +15,7 @@ class FieldOption(StrictModel):
 
 
 class ReviewField(StrictModel):
+    hidden: bool = False
     action_id: str
     key: str
     label: str

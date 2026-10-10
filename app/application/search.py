@@ -5,6 +5,7 @@ from datetime import date
 from sqlalchemy import func, or_, select
 
 from app.application.inventory import row_state
+from app.application.pagination import item_order
 from app.application.settings import effective_settings
 from app.db.models import Alias, Balance, Item, Location, Lot, Workspace
 from app.domain.common import digest, jsonable
@@ -31,6 +32,7 @@ async def search_document(db, item):
             item.model or "",
             item.barcode or "",
             item.user_description or "",
+            item.ocr_text or "",
             *item.tags,
             *aliases,
             json.dumps(item.attributes, ensure_ascii=False, sort_keys=True),
@@ -38,7 +40,7 @@ async def search_document(db, item):
     )
 
 
-async def candidates(db, workspace_id, query, limit=8):
+async def candidates(db, workspace_id, query, limit=8, *, exclude_ids=()):
     aliases = select(Alias.item_id).where(
         Alias.workspace_id == workspace_id,
         Alias.active.is_(True),
@@ -49,6 +51,8 @@ async def candidates(db, workspace_id, query, limit=8):
     )
     predicates = [
         Item.name.icontains(query, autoescape=True),
+        Item.ocr_text.icontains(query, autoescape=True),
+        Item.user_description.icontains(query, autoescape=True),
         Item.id == query,
         Item.barcode == query,
         func.lower(Item.model) == query.casefold(),
@@ -57,14 +61,24 @@ async def candidates(db, workspace_id, query, limit=8):
     ]
     if db.bind.dialect.name == "postgresql" and query:
         predicates.append(
-            func.to_tsvector("russian", Item.name + " " + func.coalesce(Item.user_description, "")).op("@@")(
-                func.plainto_tsquery("russian", query)
-            )
+            func.to_tsvector(
+                "russian",
+                Item.name
+                + " "
+                + func.coalesce(Item.user_description, "")
+                + " "
+                + func.coalesce(Item.ocr_text, ""),
+            ).op("@@")(func.plainto_tsquery("russian", query))
         )
     return (
         await db.scalars(
             select(Item)
-            .where(Item.workspace_id == workspace_id, Item.lifecycle == "active", or_(*predicates))
+            .where(
+                Item.workspace_id == workspace_id,
+                Item.lifecycle == "active",
+                or_(*predicates),
+                Item.id.not_in(exclude_ids),
+            )
             .order_by(Item.name, Item.id)
             .limit(limit)
         )
@@ -72,6 +86,8 @@ async def candidates(db, workspace_id, query, limit=8):
 
 
 async def candidate_card(db, item):
+    from app.application.drafts import review_info
+
     lots = (
         await db.scalars(
             select(Lot).where(
@@ -99,6 +115,7 @@ async def candidate_card(db, item):
         "attributes": item.attributes,
         "version": item.version,
         "index_revision": item.indexed_revision,
+        **await review_info(db, item),
         **aggregate(balances, item.tracking_mode),
         "lots": [],
     }
@@ -132,10 +149,20 @@ async def search(
     location_id=None,
     availability=None,
     expired=False,
+    sort="relevance",
+    review_status=None,
     limit=30,
     cursor=None,
 ):
-    identity = digest([workspace_id, query, category, location_id, availability, expired])
+    require(
+        sort in {"relevance", "newest", "oldest", "name_asc", "name_desc", "status", "expiry"},
+        "INVALID_SORT",
+        "Неизвестная сортировка.",
+        400,
+    )
+    identity = digest(
+        [workspace_id, query, category, location_id, availability, expired, sort, review_status]
+    )
     offset = 0
     if cursor:
         try:
@@ -151,7 +178,7 @@ async def search(
             raise DomainError("INVALID_CURSOR", "Некорректный курсор поиска.", 400) from error
     async with factory() as db:
         _, settings = await effective_settings(db)
-        exact = await candidates(db, workspace_id, query, limit)
+        exact = await candidates(db, workspace_id, query, None)
         ids = [item.id for item in exact]
     matched = {item_id: "text_or_exact" for item_id in ids}
     warning = None
@@ -181,6 +208,8 @@ async def search(
             query_db = query_db.where(Item.id.in_(ids))
         if category:
             query_db = query_db.where(Item.primary_category == category)
+        if review_status:
+            query_db = query_db.where(Item.review_status == review_status)
         if location_id:
             all_locations = (
                 await db.scalars(select(Location).where(Location.workspace_id == workspace_id))
@@ -211,8 +240,16 @@ async def search(
                     )
                 )
             )
+        if sort != "relevance":
+            query_db = query_db.order_by(
+                *(column.desc() if descending else column.asc() for column, descending in item_order(sort))
+            )
+        else:
+            query_db = query_db.order_by(Item.id)
         rows = (await db.scalars(query_db)).all()
-        rows.sort(key=lambda item: ids.index(item.id) if item.id in ids else len(ids))
+        if sort == "relevance":
+            ranks = {item_id: rank for rank, item_id in enumerate(ids)}
+            rows.sort(key=lambda item: ranks.get(item.id, len(ids)))
         result = []
         for item in rows:
             card = await candidate_card(db, item)
@@ -222,7 +259,9 @@ async def search(
                 {
                     **card,
                     "matched_by": matched.get(item.id, "filter"),
-                    "explanation_short": "Совпадение по подтверждённым данным каталога.",
+                    "explanation_short": "Совпадение по данным каталога."
+                    if item.review_status == "confirmed"
+                    else "Карточка ещё не подтверждена пользователем.",
                 }
             )
         from app.application.photos import item_photos

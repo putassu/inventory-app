@@ -61,6 +61,7 @@ class InventoryState:
         self.entries = []
         self.previews = []
         self.current_action = ""
+        self.automatic = False
 
     def get(self, kind, entity_id):
         require(entity_id, "FIELD_REQUIRED", "Выберите объект в форме.", 422, field=kind + "_id")
@@ -106,8 +107,8 @@ class InventoryState:
         )
 
     def confirm_balance(self, balance):
-        balance["last_confirmed_at"] = utcnow()
-        balance["last_confirmed_by"] = self.user_id
+        balance["last_confirmed_at"] = None if self.automatic else utcnow()
+        balance["last_confirmed_by"] = None if self.automatic else self.user_id
 
     def set_expiry(self, lot):
         lot["effective_expiry_on"], lot["expiry_derivation"] = effective_expiry(
@@ -123,8 +124,11 @@ class InventoryState:
     def validate(self):
         from types import SimpleNamespace
 
+        from app.domain.item_fields import validate_custom_values
+
         for item in self.rows["item"].values():
             validate_item(SimpleNamespace(**item))
+            validate_custom_values(item.get("custom_attributes", {}), self.settings.get("item_fields", {}))
         for lot in self.rows["lot"].values():
             item = self.rows["item"][lot["item_id"]]
             balances = [b for b in self.rows["balance"].values() if b["lot_id"] == lot["id"]]
@@ -230,7 +234,7 @@ class InventoryState:
             self.previews.append({"action_id": action.action_id, **summary, "changes": changes})
         return self
 
-    def receive_stock(self, v):
+    def receive_stock(self, v, *, replace_item_id=None):
         location = self.location(v["location_id"])
         if v["item_mode"] == "create":
             require(
@@ -240,14 +244,14 @@ class InventoryState:
                 422,
                 field="item_name",
             )
-            item = self.create(
-                "item",
+            values = dict(
                 name=v["item_name"],
                 primary_category=v["category"],
                 tracking_mode=v["tracking_mode"],
                 base_unit_id="pcs" if v["unit_code"] == "pair" else v["unit_code"],
                 quantity_step=Decimal(v["quantity_step"]),
                 attributes=v["attributes"],
+                custom_attributes=v["custom_attributes"],
                 privacy_policy=v["privacy_policy"],
                 created_by=self.user_id,
                 **{
@@ -259,9 +263,21 @@ class InventoryState:
                         "model",
                         "user_description",
                         "generated_description",
+                        "ocr_text",
                     )
                 },
             )
+            if replace_item_id:
+                item = self.item(replace_item_id)
+                require(
+                    item["review_status"] != "confirmed",
+                    "ALREADY_VERIFIED",
+                    "Карточка уже подтверждена. Используйте обычное редактирование.",
+                )
+                values.pop("created_by")
+                item.update(values)
+            else:
+                item = self.create("item", **values)
         else:
             item = self.item(v["item_id"])
         policy = (
@@ -271,8 +287,7 @@ class InventoryState:
             else "cloud_allowed"
         )
         if v["lot_mode"] == "create":
-            lot = self.create(
-                "lot",
+            values = dict(
                 item_id=item["id"],
                 lot_kind={"individual": "instance", "untracked": "untracked"}.get(
                     item["tracking_mode"], "batch"
@@ -281,6 +296,16 @@ class InventoryState:
                 attributes=v["lot_attributes"],
                 **{key: as_date(v[key]) if key in DATE_FIELDS else v[key] for key in LOT_FIELDS},
             )
+            if replace_item_id:
+                lots = [lot for lot in self.rows["lot"].values() if lot["item_id"] == item["id"]]
+                require(
+                    len(lots) == 1, "REVIEW_STOCK_CHANGED", "Состав вещи изменился. Проверьте её остатки."
+                )
+                lot = self.get("lot", lots[0]["id"])
+                require(not lot["archived_at"], "LOT_ARCHIVED", "Вещи находятся в архиве.")
+                lot.update(values)
+            else:
+                lot = self.create("lot", **values)
             self.set_expiry(lot)
         else:
             lot, _ = self.lot_item(v["lot_id"])
@@ -296,13 +321,23 @@ class InventoryState:
             require(
                 lot["privacy_policy"] == policy, "LOT_INCOMPATIBLE", "Режимы приватности партий различаются."
             )
-        balance = self.balance(lot["id"], location["id"], create=True)
+        if replace_item_id:
+            balances = [b for b in self.rows["balance"].values() if b["lot_id"] == lot["id"]]
+            require(
+                len(balances) == 1,
+                "REVIEW_STOCK_CHANGED",
+                "Вещь размещена в нескольких местах. Проверьте остатки.",
+            )
+            balance = self.get("balance", balances[0]["id"])
+            balance["location_id"] = location["id"]
+        else:
+            balance = self.balance(lot["id"], location["id"], create=True)
         qty = Decimal(v["quantity"]) if v["quantity"] is not None else None
         if qty is not None:
             qty = convert_quantity(
                 qty, v["unit_code"] or item["base_unit_id"], item["base_unit_id"], v["package_size"]
             )
-        if balance["id"] in self.original["balance"] or balance["quantity"] != 0:
+        if not replace_item_id and (balance["id"] in self.original["balance"] or balance["quantity"] != 0):
             require(
                 qty is not None and balance["quantity"] is not None,
                 "UNKNOWN_QUANTITY_MERGE",
@@ -312,18 +347,24 @@ class InventoryState:
         balance["quantity"] = qty
         balance["quantity_state"] = (
             "estimated"
-            if "estimated" in (v["quantity_state"], balance["quantity_state"])
+            if not replace_item_id and "estimated" in (v["quantity_state"], balance["quantity_state"])
             else v["quantity_state"]
         )
         self.confirm_balance(balance)
         return {
-            "creates_item": v["item_mode"] == "create",
-            "creates_lot": v["lot_mode"] == "create",
+            "creates_item": v["item_mode"] == "create" and not replace_item_id,
+            "creates_lot": v["lot_mode"] == "create" and not replace_item_id,
             "item_id": item["id"],
             "lot_id": lot["id"],
             "location_label": location["name"],
             "quantity_after": str(qty) if qty is not None else None,
         }
+
+    def verify_item(self, v):
+        summary = self.receive_stock(v, replace_item_id=v["item_id"])
+        item = self.rows["item"][summary["item_id"]]
+        item["review_status"] = "unconfirmed" if self.automatic else "confirmed"
+        return summary
 
     def source(self, v):
         lot, item = self.lot_item(v["lot_id"])
@@ -419,15 +460,16 @@ class InventoryState:
     def update_item(self, v):
         item = self.item(v["item_id"])
         for key, value in v.items():
-            if key != "item_id":
+            if key not in {"item_id", "media_ids"}:
                 require(
-                    value is not None or key in {"barcode", "brand", "model", "user_description"},
+                    value is not None or key in {"barcode", "brand", "model", "user_description", "ocr_text"},
                     "FIELD_REQUIRED",
                     "Это поле нельзя очистить.",
                     422,
                     field=key,
                 )
                 item[key] = value
+        return {"item_id": item["id"]}
 
     def update_lot(self, v):
         lot, item = self.lot_item(v["lot_id"])
@@ -529,11 +571,113 @@ class InventoryState:
             # parent_lot_id хранит происхождение при разделении. Связь слияния
             # остаётся в журнале; подмена родителя создала бы цикл с потомком.
 
+    def merge_items(self, v):
+        source, target = self.item(v["source_item_id"]), self.item(v["target_item_id"])
+        require(source["id"] != target["id"], "MERGE_NOT_ALLOWED", "Выберите две разные вещи.", 422)
+        require(
+            target["tracking_mode"] in {"counted", "measured"},
+            "MERGE_NOT_ALLOWED",
+            "Уникальные вещи и учёт только наличия не объединяются.",
+            422,
+        )
+        fields = {
+            "primary_category",
+            "secondary_categories",
+            "custom_attributes",
+            "tracking_mode",
+            "base_unit_id",
+            "quantity_step",
+            "attributes",
+            "barcode",
+            "brand",
+            "model",
+            "tags",
+            "user_description",
+            "ocr_text",
+            "privacy_policy",
+        }
+        require(
+            all(source.get(key) == target.get(key) for key in fields),
+            "ITEM_INCOMPATIBLE",
+            "Категория, единица, режим учёта, свойства, описание и приватность должны совпадать.",
+            422,
+        )
+        lots = {
+            side["id"]: [
+                self.get("lot", lot["id"])
+                for lot in self.rows["lot"].values()
+                if lot["item_id"] == side["id"] and not lot["archived_at"]
+            ]
+            for side in (source, target)
+        }
+        balances = {
+            item_id: [
+                self.get("balance", b["id"])
+                for b in self.rows["balance"].values()
+                if b["lot_id"] in {lot["id"] for lot in rows}
+            ]
+            for item_id, rows in lots.items()
+        }
+        require(
+            all(b["quantity"] is not None for rows in balances.values() for b in rows),
+            "UNKNOWN_QUANTITY_MERGE",
+            "Сначала уточните неизвестные остатки обеих вещей.",
+            422,
+        )
+        active = {key: [b for b in rows if b["quantity"] > 0] for key, rows in balances.items()}
+        require(all(active.values()), "MERGE_NOT_ALLOWED", "У обеих вещей должен быть остаток.", 422)
+        destinations = {b["location_id"] for b in active[target["id"]]}
+        location_id = v["target_location_id"] or (
+            next(iter(destinations)) if len(destinations) == 1 else None
+        )
+        require(
+            location_id in destinations,
+            "MERGE_LOCATION_REQUIRED",
+            "Выберите одно из мест целевой вещи.",
+            422,
+            field="target_location_id",
+        )
+        location = self.location(location_id)
+        dest = next(b for b in active[target["id"]] if b["location_id"] == location_id)
+        target_lot = self.get("lot", dest["lot_id"])
+        compatible = {*LOT_FIELDS, "attributes", "privacy_policy", "lot_kind"}
+        require(
+            all(
+                all(lot[key] == target_lot[key] for key in compatible)
+                for rows in lots.values()
+                for lot in rows
+            ),
+            "LOT_INCOMPATIBLE",
+            "Сроки, сведения об упаковке и свойства остатков должны совпадать.",
+            422,
+        )
+        amount = sum(b["quantity"] for b in active[source["id"]])
+        for balance in active[source["id"]]:
+            dest["quantity"] += balance["quantity"]
+            if balance["quantity_state"] == "estimated":
+                dest["quantity_state"] = "estimated"
+            balance["quantity"] = Decimal(0)
+            self.confirm_balance(balance)
+        self.confirm_balance(dest)
+        for lot in lots[source["id"]]:
+            lot["archived_at"] = utcnow()
+        source["lifecycle"], source["archived_at"] = "archived", utcnow()
+        # Обе карточки получают новую версию; фото и названия не копируются.
+        target["updated_at"] = utcnow()
+        return {
+            "quantity": str(amount),
+            "target_after": str(dest["quantity"]),
+            "quantity_state": dest["quantity_state"],
+            "location_label": location["name"],
+            "source_name": source["name"],
+            "target_name": target["name"],
+        }
+
     def create_location(self, v):
         require(v["name"], "FIELD_REQUIRED", "Укажите название места.", 422, field="name")
         if v["parent_id"]:
             self.location(v["parent_id"])
-        location = self.create("location", **v)
+        location = self.create("location", **{k: value for k, value in v.items() if k != "media_ids"})
         return {"location_id": location["id"]}
 
     def move_location(self, v):
@@ -551,7 +695,7 @@ class InventoryState:
             location["kind"] != "system_unspecified", "SYSTEM_LOCATION", "Системное место нельзя изменять."
         )
         for key, value in v.items():
-            if key != "location_id":
+            if key not in {"location_id", "media_ids"}:
                 require(
                     key != "name" or value is not None,
                     "FIELD_REQUIRED",
@@ -560,6 +704,7 @@ class InventoryState:
                     field=key,
                 )
                 location[key] = value
+        return {"location_id": location["id"]}
 
     def archive_location(self, v):
         location = self.location(v["location_id"])
@@ -568,22 +713,13 @@ class InventoryState:
             "SYSTEM_LOCATION",
             "Системное место нельзя архивировать.",
         )
-        balances = [
-            b
-            for b in self.rows["balance"].values()
-            if b["location_id"] == location["id"] and (b["quantity"] is None or b["quantity"] > 0)
-        ]
+        balances = [b for b in self.rows["balance"].values() if b["location_id"] == location["id"]]
         children = [
             loc
             for loc in self.rows["location"].values()
             if loc["parent_id"] == location["id"] and not loc["archived_at"]
         ]
-        require(
-            not (balances or children) or v["transfer_to_id"],
-            "LOCATION_NOT_EMPTY",
-            "Выберите место для переноса содержимого.",
-        )
-        if v["transfer_to_id"]:
+        if balances or children or v["transfer_to_id"]:
             target = self.location(v["transfer_to_id"])
             require(
                 target["id"] != location["id"],
@@ -591,17 +727,31 @@ class InventoryState:
                 "Нельзя перенести содержимое в архивируемое место.",
             )
             for balance in balances:
-                self.move_stock(
-                    {
-                        "lot_id": balance["lot_id"],
-                        "location_id": location["id"],
-                        "to_location_id": target["id"],
-                        "quantity": None,
-                        "whole_presence": True,
-                    }
+                # Архивные вещи тоже сохраняют место; обычный расход их намеренно запрещает.
+                destination = next(
+                    (
+                        b
+                        for b in self.rows["balance"].values()
+                        if b["lot_id"] == balance["lot_id"] and b["location_id"] == target["id"]
+                    ),
+                    None,
                 )
+                if destination is None:
+                    balance["location_id"] = target["id"]
+                else:
+                    require(
+                        balance["quantity"] is not None and destination["quantity"] is not None,
+                        "UNKNOWN_QUANTITY_MERGE",
+                        "Уточните количество перед объединением остатков.",
+                    )
+                    destination["quantity"] += balance["quantity"]
+                    if "estimated" in (balance["quantity_state"], destination["quantity_state"]):
+                        destination["quantity_state"] = "estimated"
+                    balance["quantity"] = Decimal(0)
+                    self.confirm_balance(destination)
+                self.confirm_balance(balance)
             for child in children:
-                child["parent_id"] = target["id"]
+                child["parent_id"] = None if target["kind"] == "system_unspecified" else target["id"]
         location["archived_at"] = utcnow()
 
     def archive_item(self, v):
@@ -690,6 +840,8 @@ class InventoryState:
 
 
 async def load_state(db, workspace_id, user_id, settings, actions=()):
+    workspace = await db.get(Workspace, workspace_id)
+    settings = {**settings, "item_fields": workspace.item_fields if workspace else {}}
     rows = {}
     for kind, model in ENTITIES.items():
         entities = (await db.scalars(select(model).where(model.workspace_id == workspace_id))).all()
@@ -718,7 +870,7 @@ async def load_state(db, workspace_id, user_id, settings, actions=()):
     return InventoryState(workspace_id, user_id, rows, settings, history)
 
 
-async def persist_state(db, state, operation_id):
+async def persist_state(db, state, operation_id=None):
     changed_items = set()
     for kind, model in ENTITIES.items():
         for entity_id, values in state.rows[kind].items():
@@ -738,8 +890,9 @@ async def persist_state(db, state, operation_id):
             elif kind == "balance":
                 changed_items.add(state.rows["lot"][values["lot_id"]]["item_id"])
         await db.flush()
-    for entry in state.entries:
-        db.add(Entry(operation_id=operation_id, **entry))
+    if operation_id:
+        for entry in state.entries:
+            db.add(Entry(operation_id=operation_id, **entry))
     for item_id in changed_items:
         item = state.rows["item"][item_id]
         db.add(
@@ -750,7 +903,7 @@ async def persist_state(db, state, operation_id):
                 entity_version=item["version"],
             )
         )
-    if state.entries:
+    if state.entries or changed_items:
         workspace = await db.get(Workspace, state.workspace_id)
         workspace.version += 1
         workspace.updated_at = utcnow()

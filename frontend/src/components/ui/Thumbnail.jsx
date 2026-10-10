@@ -57,6 +57,7 @@ export function Thumbnail({
         <img
           src={image.url}
           alt={alt}
+          onError={() => setImage(null)}
           style={{
             width: '100%',
             height: full ? 'auto' : '100%',

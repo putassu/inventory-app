@@ -48,9 +48,9 @@ REGISTRY = {
         editable=False,
     ),
     "routing.max_total_attempts": number(
-        6, "Всего вызовов на задачу: до четырёх аудиочастей, проверка и извлечение", 1, 12
+        12, "Всего вызовов на задачу, включая аудио, проверку и повторы", 1, 12
     ),
-    "routing.max_external_calls": number(1, "Внешних вызовов на задачу", 0, 5),
+    "routing.max_external_calls": number(3, "Внешних вызовов на задачу", 0, 5),
     "routing.max_external_cost_per_task": Setting(
         None, "decimal", "Максимальная внешняя стоимость", 0, 100, nullable=True
     ),
@@ -75,7 +75,8 @@ REGISTRY = {
     "queue.default_weight": number(4, "Вес обычной очереди", 1, 20, apply_mode="immediate"),
     "queue.bulk_weight": number(1, "Вес массовой очереди", 1, 20, apply_mode="immediate"),
     "queue.bulk_after_outstanding": number(5, "Порог массовой очереди", 1, 1000, nullable=True),
-    "queue.max_pending_per_user": number(500, "Лимит ожидающих задач", 1, 10000),
+    "queue.max_pending_per_user": number(1, "Лимит ожидающих задач пользователя", 1, 10000),
+    "queue.max_pending_total": number(1, "Общий лимит незавершённых AI-задач", 1, 100),
     "queue.local_gpu_slots": number(1, "Одновременных GPU-вызовов", 1, 1, apply_mode="requires_restart"),
     "queue.cpu_concurrency": number(2, "Одновременных CPU-задач", 1, 8, apply_mode="requires_restart"),
     "queue.cloud_concurrency": number(
@@ -92,7 +93,7 @@ REGISTRY = {
     ),
     "retry.base_delay_seconds": number(2, "Начальная задержка повтора", 1, 300),
     "retry.max_delay_seconds": number(300, "Максимальная задержка", 1, 3600),
-    "retry.max_attempts_per_stage": number(2, "Попыток на стадию", 1, 5),
+    "retry.max_attempts_per_stage": number(3, "Попыток на стадию, включая первую", 1, 5),
     "media.max_images_per_task": number(3, "Фотографий на задачу", 1, 12),
     "media.max_file_bytes": number(15 * 1024 * 1024, "Размер одного файла", 1024, 100 * 1024 * 1024),
     "media.max_task_bytes": number(45 * 1024 * 1024, "Размер материалов задачи", 1024, 300 * 1024 * 1024),

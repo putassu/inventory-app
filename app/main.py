@@ -8,13 +8,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.api import admin, auth, catalog, maintenance, media, notifications, search, tasks
-from app.api.deps import current_user
+from app.api import admin, auth, catalog, item_fields, maintenance, media, notifications, search, tasks
+from app.api.deps import current_user, db_session
+from app.application.settings import effective_settings
 from app.config import get_config
+from app.db.models import Control, GPUSlot
 from app.db.session import session_factory
 from app.domain.common import uid
 from app.domain.errors import DomainError
 from app.infrastructure.logging import configure_logging
+from app.infrastructure.workers import processing_health
 
 logger = logging.getLogger("inventory")
 
@@ -123,15 +126,36 @@ def create_app(factory=None):
                     if not db.bind.dialect.name == "sqlite"
                     else text("SELECT 1")
                 )
-            return {"status": "ready"}
+                processing = await processing_health(db)
+            ready = processing["recognition_available"]
+            return JSONResponse(
+                {"status": "ready" if ready else "degraded", **processing},
+                status_code=200 if ready else 503,
+            )
         except Exception:
             return JSONResponse({"status": "unavailable"}, status_code=503)
 
+    @app.get("/api/v1/processing-status")
+    async def processing_status(user=Depends(current_user), db=db_session):
+        return await processing_health(db)
+
     @app.get("/api/v1/capabilities")
-    async def capabilities(user=Depends(current_user)):
+    async def capabilities(user=Depends(current_user), db=db_session):
+        _, settings = await effective_settings(db)
+        slot = await db.get(GPUSlot, 1)
+        queue = await db.get(Control, "queue:default")
         return {
             "schemas": ["review.v1", "extraction.v1", "command.v1", "collage.v1", "export.v1"],
             "media_types": ["image/jpeg", "image/png", "image/webp", "audio/wav"],
+            "max_pending_ai_tasks": settings["queue.max_pending_total"],
+            "ai_processing_paused": bool(queue and queue.value.get("paused"))
+            or bool(slot and slot.state == "quarantined"),
+            "media_limits": {
+                "max_images": settings["media.max_images_per_task"],
+                "max_file_bytes": settings["media.max_file_bytes"],
+                "max_task_bytes": settings["media.max_task_bytes"],
+                "max_audio_seconds": settings["media.max_audio_seconds"],
+            },
             "media_preprocessing": {
                 "client_preprocessing_supported": True,
                 "server_revalidates": True,
@@ -149,12 +173,7 @@ def create_app(factory=None):
                     "multiple_images": "collage",
                 },
             },
-            "audio_inference": bool(
-                config.local_audio_url
-                and config.local_audio_model
-                and config.local_audio_trusted
-                and config.local_audio_verified
-            ),
+            "audio_inference": config.audio_configured,
             "controls": [
                 "entity_picker",
                 "location_picker",
@@ -175,11 +194,14 @@ def create_app(factory=None):
             "polling": True,
             "push": False,
             "external_enabled_by_default": False,
+            "cloud_configured": config.cloud_configured,
+            "external_enabled": settings["routing.external_enabled"],
         }
 
     for router in (
         auth.router,
         catalog.router,
+        item_fields.router,
         media.router,
         tasks.router,
         search.router,

@@ -2,7 +2,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
 
-from app.api.deps import database, scope
+from app.api.deps import db_session, scope
+from app.application.pagination import ItemSort, ReviewStatus
 from app.application.search import search
 
 router = APIRouter()
@@ -16,10 +17,12 @@ async def search_items(
     location_id: UUID | None = None,
     availability: str | None = None,
     expired: bool = False,
+    sort: ItemSort | str = "relevance",
+    review_status: ReviewStatus | None = None,
     limit: int = Query(30, ge=1, le=100),
     cursor: str | None = None,
     selected=Depends(scope),
-    db=Depends(database),
+    db=db_session,
 ):
     await db.commit()
     return await search(
@@ -30,6 +33,8 @@ async def search_items(
         location_id=str(location_id) if location_id else None,
         availability=availability,
         expired=expired,
+        sort=sort,
+        review_status=review_status,
         limit=limit,
         cursor=cursor,
     )

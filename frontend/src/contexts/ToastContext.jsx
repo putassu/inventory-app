@@ -1,3 +1,4 @@
+import { randomId } from '../utils/id'
 import { createContext, useContext, useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { onScopeChanged } from '../api/client'
 const ToastContext = createContext(null)
@@ -12,7 +13,7 @@ export function ToastProvider({ children }) {
   )
   const addToast = useCallback(
     (message, type = 'info', options = {}) => {
-      const id = crypto.randomUUID()
+      const id = randomId()
       setToasts((rows) => [...rows, { id, message, type }])
       const timer = setTimeout(
         () => {

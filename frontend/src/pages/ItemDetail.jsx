@@ -8,9 +8,14 @@ import { Modal } from '../components/ui/Modal'
 import { StockOperationsModal } from '../components/operations/StockOperationsModal'
 import { ReceiveStockModal } from '../components/operations/ReceiveStockModal'
 import { ItemOperationsModal } from '../components/operations/ItemOperationsModal'
+import { EditItemModal } from '../components/operations/EditItemModal'
 import { LotOperationsModal } from '../components/operations/LotOperationsModal'
-import { formatQuantity, formatBalance } from '../utils/quantity'
+import { formatQuantity, formatBalance, scaled } from '../utils/quantity'
 import { label } from '../utils/labels'
+import { describeValue } from '../utils/display'
+import { ItemReviewStatus } from '../components/ItemReviewStatus'
+import { useTaskRefresh } from '../hooks/useTaskRefresh'
+import { visibleStocks } from '../utils/editItem'
 
 export function ItemDetail() {
   const { id } = useParams()
@@ -21,6 +26,8 @@ function Detail({ id }) {
     locations = useResource('/locations')
   const aliases = useResource(`/items/${id}/aliases`),
     history = usePaged(`/items/${id}/history?limit=20`)
+  const itemFields = useResource('/item-fields')
+  useTaskRefresh(resource.reload)
   const [tab, setTab] = useState('lots'),
     [modal, setModal] = useState(null),
     [photo, setPhoto] = useState(null)
@@ -59,7 +66,8 @@ function Detail({ id }) {
       <section className="card stack">
         <div className="toolbar">
           <h1>{item.name}</h1>
-          <span className="badge">{active ? 'Активно' : 'В архиве'}</span>
+          <ItemReviewStatus item={item} />
+          {!active && <span className="badge">В архиве</span>}
         </div>
         <p>
           {label(item.primary_category)} · {formatQuantity(item)} · {label(item.privacy_policy)}
@@ -79,22 +87,24 @@ function Detail({ id }) {
         <div className="actions">
           {active ? (
             <>
-              <Button onClick={() => setModal({ type: 'receive' })}>Пополнить</Button>
-              <Button
-                variant="secondary"
-                onClick={() => setModal({ type: 'item', operation: 'update' })}
-              >
-                Изменить карточку
-              </Button>
-              <Button
-                variant="secondary"
-                onClick={() => setModal({ type: 'item', operation: 'archive' })}
-              >
-                В архив
-              </Button>
-              <Link className="btn btn-secondary" to={`/capture?item_id=${id}`}>
-                Фото или голос для этой вещи
-              </Link>
+              <Button onClick={() => setModal({ type: 'edit' })}>Редактировать</Button>
+              {!['untracked', 'individual'].includes(item.tracking_mode) && (
+                <Button onClick={() => setModal({ type: 'receive' })}>Пополнить</Button>
+              )}
+              <details className="action-menu">
+                <summary>Ещё</summary>
+                <div className="actions">
+                  <Button
+                    variant="secondary"
+                    onClick={() => setModal({ type: 'item', operation: 'archive' })}
+                  >
+                    В архив
+                  </Button>
+                  <Link className="btn btn-secondary" to={`/capture?item_id=${id}`}>
+                    Фото или голос для этой вещи
+                  </Link>
+                </div>
+              </details>
             </>
           ) : (
             <Button onClick={() => setModal({ type: 'item', operation: 'restore' })}>
@@ -105,7 +115,7 @@ function Detail({ id }) {
       </section>
       <nav className="tabs" aria-label="Карточка вещи">
         {[
-          ['lots', 'Партии и остатки'],
+          ['lots', 'Где и сколько'],
           ['data', 'Описание'],
           ['history', 'История'],
         ].map(([value, title]) => (
@@ -125,7 +135,7 @@ function Detail({ id }) {
             .filter((lot) => !lot.archived_at)
             .map((lot) => (
               <section className="card stack" key={lot.id}>
-                <h2>{lot.label || lot.serial_number || 'Партия'}</h2>
+                {(lot.label || lot.serial_number) && <h2>{lot.label || lot.serial_number}</h2>}
                 <p>
                   Срок:{' '}
                   {lot.expiry_precision === 'month'
@@ -133,15 +143,16 @@ function Detail({ id }) {
                     : lot.effective_expiry_on || lot.expiry_on || 'неизвестен'}
                   {lot.opened_on && ` · Открыто ${lot.opened_on}`}
                 </p>
-                {lot.manufacturer_batch && <p>Партия производителя: {lot.manufacturer_batch}</p>}
-                {item.balances
+                {visibleStocks(item)
                   .filter((balance) => balance.lot_id === lot.id)
                   .map((balance) => (
                     <div className="balance-row" key={balance.id}>
                       <Link to={`/locations/${balance.location_id}`}>
                         {locationName(balance.location_id)}
                       </Link>
-                      <strong>{formatBalance(balance, item.base_unit_id)}</strong>
+                      <strong>
+                        {formatBalance(balance, item.base_unit_id, item.attributes?.counting_unit)}
+                      </strong>
                       {active && (
                         <div className="actions">
                           {[
@@ -154,8 +165,10 @@ function Detail({ id }) {
                               key={operation}
                               variant="secondary"
                               disabled={
-                                operation === 'consume' &&
-                                (balance.quantity == null || balance.quantity === '0')
+                                (operation === 'consume' && balance.quantity == null) ||
+                                (['consume', 'move'].includes(operation) &&
+                                  balance.quantity != null &&
+                                  scaled(balance.quantity) === 0n)
                               }
                               onClick={() => setModal({ type: 'stock', operation, lot, balance })}
                             >
@@ -167,31 +180,49 @@ function Detail({ id }) {
                     </div>
                   ))}
                 {active && (
-                  <div className="actions">
-                    {[
-                      ['update', 'Изменить партию'],
-                      ['split', 'Разделить'],
-                      ['merge', 'Объединить'],
-                    ].map(([operation, title]) => (
-                      <Button
-                        key={operation}
-                        variant="text"
-                        onClick={() => setModal({ type: 'lot', operation, lot })}
-                      >
-                        {title}
-                      </Button>
-                    ))}
-                  </div>
+                  <details>
+                    <summary>Срок и свойства</summary>
+                    <div className="actions">
+                      {[['update', 'Изменить сведения']].map(([operation, title]) => (
+                        <Button
+                          key={operation}
+                          variant="text"
+                          disabled={
+                            (operation !== 'update' &&
+                              ['untracked', 'individual'].includes(item.tracking_mode)) ||
+                            (operation === 'merge' &&
+                              item.lots.filter((row) => !row.archived_at).length < 2) ||
+                            (operation === 'split' &&
+                              !item.balances.some(
+                                (balance) =>
+                                  balance.lot_id === lot.id &&
+                                  balance.quantity != null &&
+                                  scaled(balance.quantity) > 0n,
+                              ))
+                          }
+                          onClick={() => setModal({ type: 'lot', operation, lot })}
+                        >
+                          {title}
+                        </Button>
+                      ))}
+                    </div>
+                  </details>
                 )}
               </section>
             ))}
-          {!item.lots.length && <p>Партий пока нет.</p>}
+          {!item.lots.length && <p>Место и количество пока не указаны.</p>}
         </div>
       )}
       {tab === 'data' && (
         <section className="card stack">
           <h2>Описание</h2>
           <p>{item.user_description || 'Описание не указано'}</p>
+          {item.ocr_text && (
+            <details>
+              <summary>Полный текст OCR</summary>
+              <pre className="ocr-text">{item.ocr_text}</pre>
+            </details>
+          )}
           {item.generated_description && <p>Описание модели: {item.generated_description}</p>}
           <dl>
             {[
@@ -200,12 +231,16 @@ function Detail({ id }) {
               ['Штрихкод', item.barcode],
               ['Метки', item.tags?.join(', ')],
               ...Object.entries(item.attributes || {}),
+              ...Object.entries(item.custom_attributes || {}).map(([key, value]) => [
+                itemFields.data?.custom_fields.find((field) => field.key === key)?.label || key,
+                value,
+              ]),
             ].map(
               ([key, value]) =>
                 value != null && (
                   <div key={key}>
                     <dt>{label(key)}</dt>
-                    <dd>{typeof value === 'object' ? JSON.stringify(value) : String(value)}</dd>
+                    <dd>{describeValue(value, key)}</dd>
                   </div>
                 ),
             )}
@@ -251,6 +286,7 @@ function Detail({ id }) {
         </section>
       )}
       {modal?.type === 'receive' && <ReceiveStockModal {...common} />}
+      {modal?.type === 'edit' && <EditItemModal {...common} />}
       {modal?.type === 'stock' && (
         <StockOperationsModal
           {...common}

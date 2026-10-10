@@ -27,7 +27,7 @@ export function Modal({ isOpen, onClose, title, children, footer, busy = false }
         if (!busy) onClose()
       }}
     >
-      <div className="toolbar">
+      <div className="toolbar dialog-heading">
         <h2 id={titleId}>{title}</h2>
         <button type="button" disabled={busy} aria-label="Закрыть окно" onClick={onClose}>
           ×

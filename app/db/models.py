@@ -80,6 +80,8 @@ class Workspace(Entity, Base):
     __tablename__ = "workspaces"
     name: Mapped[str] = mapped_column(String(255))
     owner_user_id: Mapped[str] = mapped_column(ForeignKey("inventory.users.id"))
+    item_fields: Mapped[dict] = mapped_column(J, default=dict)
+    item_fields_version: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class Membership(Base):
@@ -146,6 +148,7 @@ class Item(Scoped, Base):
     base_unit_id: Mapped[str | None] = mapped_column(String(30))
     quantity_step: Mapped[Decimal] = mapped_column(Q, default=Decimal(1))
     attributes: Mapped[dict] = mapped_column(J, default=dict)
+    custom_attributes: Mapped[dict] = mapped_column(J, default=dict)
     attributes_schema_version: Mapped[str] = mapped_column(String(30), default="attributes.v1")
     barcode: Mapped[str | None] = mapped_column(String(100), index=True)
     brand: Mapped[str | None] = mapped_column(String(255))
@@ -153,17 +156,25 @@ class Item(Scoped, Base):
     tags: Mapped[list] = mapped_column(J, default=list)
     user_description: Mapped[str | None] = mapped_column(Text)
     generated_description: Mapped[str | None] = mapped_column(Text)
+    ocr_text: Mapped[str | None] = mapped_column(Text)
     description_model_revision: Mapped[str | None] = mapped_column(String(100))
     privacy_policy: Mapped[str] = mapped_column(String(20), default="local_only")
     lifecycle: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    review_status: Mapped[str] = mapped_column(String(20), default="confirmed")
+    source_task_id: Mapped[str | None] = mapped_column(String(36))
     created_by: Mapped[str] = mapped_column(ForeignKey("inventory.users.id"))
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     search_revision: Mapped[int] = mapped_column(BigInteger, default=1)
     indexed_revision: Mapped[int] = mapped_column(BigInteger, default=0)
     __table_args__ = (
+        Index("ix_inventory_items_review_status", "review_status"),
+        Index("ix_inventory_items_source_task_id", "source_task_id"),
         UniqueConstraint("workspace_id", "id"),
         CheckConstraint("quantity_step > 0", name="positive_step"),
+        CheckConstraint(
+            "review_status IN ('processing','unconfirmed','confirmed','error')", name="item_review_status"
+        ),
         CheckConstraint(
             "primary_category != 'document' OR privacy_policy = 'local_only'", name="private_document"
         ),

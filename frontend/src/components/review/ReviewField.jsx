@@ -27,7 +27,7 @@ export function ReviewField({ field, value, onChange, references = {} }) {
   const disabled = editable === false
   let options = (field.options || []).map((option) => ({
     value: option.value ?? option.code,
-    label: option.label || option.name || label(option.value ?? option.code),
+    label: label(option.label || option.name || option.value || option.code),
   }))
   if (control === 'location_picker')
     options = (references.locations || []).map((location) => ({
@@ -50,7 +50,7 @@ export function ReviewField({ field, value, onChange, references = {} }) {
         .filter((lot) => !lot.archived_at)
         .map((lot) => ({
           value: lot.id,
-          label: `${item.name} · ${lot.label || lot.serial_number || 'Партия'} · ${lot.effective_expiry_on || 'Срок неизвестен'} · ${lot.id.slice(0, 8)}`,
+          label: `${item.name} · ${lot.label || lot.serial_number || 'добавлено ' + (lot.created_at?.slice(0, 10) || '')} · ${lot.effective_expiry_on || 'Срок неизвестен'}`,
         })),
     )
   if (key === 'alias_id')
@@ -125,6 +125,17 @@ export function ReviewField({ field, value, onChange, references = {} }) {
     )
   }
   if (['number_stepper', 'decimal_input'].includes(control))
+    if (key.startsWith('custom_attributes.'))
+      return (
+        <Input
+          label={title}
+          inputMode="decimal"
+          value={value ?? ''}
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.value.replace(',', '.') || null)}
+        />
+      )
+  if (['number_stepper', 'decimal_input'].includes(control))
     return (
       <div className="input-group">
         <label htmlFor={id}>{title}</label>
@@ -145,6 +156,13 @@ export function ReviewField({ field, value, onChange, references = {} }) {
     <Input
       label={title}
       disabled={disabled}
+      as={
+        ['ocr_text', 'user_description', 'generated_description'].includes(key)
+          ? 'textarea'
+          : 'input'
+      }
+      rows={key === 'ocr_text' ? 8 : undefined}
+      maxLength={key === 'ocr_text' ? 100000 : undefined}
       type={control === 'date_picker' ? 'date' : control === 'month_picker' ? 'month' : 'text'}
       value={Array.isArray(value) ? value.join(', ') : (value ?? '')}
       helpText={control === 'chips_select' ? 'Значения через запятую' : undefined}

@@ -7,7 +7,14 @@ import wave
 import httpx
 
 from app.config import get_config
-from app.infrastructure.models import ModelError, parse_json, provider_error
+from app.infrastructure.models import (
+    ModelError,
+    gateway_headers,
+    local_transport_error,
+    parse_json,
+    provider_error,
+    trusted_gateway,
+)
 
 
 def segments(data, max_seconds=20, overlap_seconds=1):
@@ -74,16 +81,21 @@ class LocalAudioAdapter:
 
     async def infer(self, data, timeout, *, model=None):
         config = self.config
-        if not config.local_audio_url or not config.local_audio_model or not config.local_audio_trusted:
+        gateway = bool(config.litellm_url)
+        if gateway:
+            trusted_gateway(config, model or config.local_audio_model)
+        elif not config.local_audio_url or not config.local_audio_model or not config.local_audio_trusted:
             raise ModelError(
                 "UNSUPPORTED_AUDIO",
                 "Текущая локальная Gemma не поддерживает аудио. Запись сохранена; используйте текст или ручную форму.",
             )
         try:
             async with httpx.AsyncClient(
-                base_url=config.local_audio_url.rstrip("/") + "/",
+                base_url=(config.litellm_url or config.local_audio_url).rstrip("/") + "/",
                 trust_env=False,
-                headers={"Authorization": "Bearer " + config.local_audio_key.get_secret_value()},
+                headers=gateway_headers(config)
+                if gateway
+                else {"Authorization": "Bearer " + config.local_audio_key.get_secret_value()},
                 transport=self.transport,
                 timeout=timeout,
             ) as client:
@@ -112,6 +124,7 @@ class LocalAudioAdapter:
                         "temperature": 0,
                         "max_tokens": 2048,
                         "response_format": {"type": "json_object"},
+                        **({"disable_fallbacks": True} if gateway else {}),
                     },
                 )
                 if response.is_error:
@@ -120,7 +133,7 @@ class LocalAudioAdapter:
                 if set(result) != {"transcription"} or not isinstance(result["transcription"], str):
                     raise ModelError("INVALID_MODEL_JSON")
                 return result["transcription"]
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            raise ModelError("LOCAL_TIMEOUT", physical_unknown=True) from exc
+        except httpx.TransportError as exc:
+            raise local_transport_error(exc) from exc
         except (KeyError, ValueError, TypeError) as exc:
             raise ModelError("INVALID_MODEL_JSON") from exc

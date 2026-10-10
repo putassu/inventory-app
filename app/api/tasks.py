@@ -6,7 +6,7 @@ from pydantic import Field
 from sqlalchemy import func, select
 
 from app.api.catalog import page, serialize
-from app.api.deps import database, idempotency_key, scope, write_scope
+from app.api.deps import db_session, idempotency_key, scope, write_scope
 from app.application.idempotency import previous_response, remember
 from app.application.tasks import ACTIVE, cancel_task, create_task, manual_review, task_view
 from app.db.models import Batch, Confirmation, Task
@@ -20,7 +20,7 @@ router = APIRouter()
 
 @router.post("/tasks", status_code=202)
 async def create(
-    data: TaskCreate, key=Depends(idempotency_key), selected=Depends(write_scope), db=Depends(database)
+    data: TaskCreate, key=Depends(idempotency_key), selected=Depends(write_scope), db=db_session
 ):
     body = data.model_dump(mode="json")
     cached = await previous_response(db, selected.user.id, selected.workspace_id, "create_task", key, body)
@@ -37,7 +37,7 @@ async def tasks(
     batch_id: UUID | None = None,
     status: str | None = None,
     selected=Depends(scope),
-    db=Depends(database),
+    db=db_session,
 ):
     query = select(Task).where(
         Task.workspace_id == selected.workspace_id,
@@ -60,7 +60,7 @@ class Poll(StrictModel):
 
 
 @router.post("/tasks/status")
-async def poll(data: Poll, selected=Depends(scope), db=Depends(database)):
+async def poll(data: Poll, selected=Depends(scope), db=db_session):
     changed, unchanged = [], []
     for entry in data.tasks:
         task = await scoped_get(db, Task, entry.task_id, selected.workspace_id)
@@ -78,7 +78,7 @@ async def task_status(
     response: Response,
     if_none_match: str | None = Header(None),
     selected=Depends(scope),
-    db=Depends(database),
+    db=db_session,
 ):
     task = await scoped_get(db, Task, task_id, selected.workspace_id)
     require(not task.context.get("deleted"), "TASK_PURGED", "Материалы задачи удалены.", 410)
@@ -90,9 +90,7 @@ async def task_status(
 
 
 @router.post("/tasks/{task_id}/cancel")
-async def cancel(
-    task_id: UUID, key=Depends(idempotency_key), selected=Depends(write_scope), db=Depends(database)
-):
+async def cancel(task_id: UUID, key=Depends(idempotency_key), selected=Depends(write_scope), db=db_session):
     return await cancel_task(db, await scoped_get(db, Task, task_id, selected.workspace_id, lock=True))
 
 
@@ -106,7 +104,7 @@ async def retry(
     data: Retry,
     key=Depends(idempotency_key),
     selected=Depends(write_scope),
-    db=Depends(database),
+    db=db_session,
 ):
     body = data.model_dump(mode="json")
     operation_scope = f"task_retry:{task_id}"
@@ -115,7 +113,9 @@ async def retry(
         return cached
     task = await scoped_get(db, Task, task_id, selected.workspace_id, lock=True)
     require(
-        task.status in {"failed", "cancelled", "expired"},
+        task.status in {"failed", "cancelled", "expired"}
+        or task.status == "waiting_for_review"
+        and bool(task.error_code),
         "INVALID_TASK_STATE",
         "Повтор доступен после остановки обработки.",
     )
@@ -132,11 +132,15 @@ async def retry(
         {
             "client_request_id": body["client_request_id"],
             "input_mode": task.input_mode,
+            "purpose": task.context.get("purpose", "inventory"),
             "text": task.input_text,
             "media_ids": task.media_ids,
             "audio_media_id": task.audio_media_id,
             "context": {k: task.context.get(k) for k in ("item_id", "location_id")},
-            "privacy": {"force_local": task.requested_privacy == "local_only"},
+            "privacy": {
+                "force_local": task.requested_privacy == "local_only",
+                "model_preference": task.context.get("model_preference", "default"),
+            },
             "batch_id": task.batch_id,
         },
         parent_task_id=task.id,
@@ -150,7 +154,7 @@ async def manual(
     data: Retry,
     key=Depends(idempotency_key),
     selected=Depends(write_scope),
-    db=Depends(database),
+    db=db_session,
 ):
     body = data.model_dump(mode="json")
     operation_scope = f"manual_review:{task_id}"
@@ -172,7 +176,7 @@ class Priority(StrictModel):
 
 
 @router.patch("/tasks/{task_id}/priority")
-async def priority(task_id: UUID, data: Priority, selected=Depends(write_scope), db=Depends(database)):
+async def priority(task_id: UUID, data: Priority, selected=Depends(write_scope), db=db_session):
     task = await scoped_get(db, Task, task_id, selected.workspace_id)
     require(
         task.status in ACTIVE - {"running"},
@@ -190,9 +194,7 @@ class BatchInput(StrictModel):
 
 
 @router.post("/ingestion-batches", status_code=201)
-async def batch(
-    data: BatchInput, key=Depends(idempotency_key), selected=Depends(write_scope), db=Depends(database)
-):
+async def batch(data: BatchInput, key=Depends(idempotency_key), selected=Depends(write_scope), db=db_session):
     body = data.model_dump()
     cached = await previous_response(
         db, selected.user.id, selected.workspace_id, "ingestion_batch", key, body
@@ -206,7 +208,7 @@ async def batch(
 
 
 @router.get("/ingestion-batches/{batch_id}")
-async def batch_progress(batch_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def batch_progress(batch_id: UUID, selected=Depends(scope), db=db_session):
     batch = await scoped_get(db, Batch, batch_id, selected.workspace_id)
     counts = (
         await db.execute(

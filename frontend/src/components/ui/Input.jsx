@@ -1,6 +1,7 @@
 import { forwardRef, useId } from 'react'
+import { Help } from './Help'
 export const Input = forwardRef(function Input(
-  { label, error, helpText, className = '', id, as: Tag = 'input', ...props },
+  { label, error, helpText, info, className = '', id, as: Tag = 'input', ...props },
   ref,
 ) {
   const generated = useId()
@@ -8,7 +9,12 @@ export const Input = forwardRef(function Input(
   const help = error || helpText
   return (
     <div className={`input-group ${className}`}>
-      {label && <label htmlFor={inputId}>{label}</label>}
+      {label && (
+        <div className="field-label">
+          <label htmlFor={inputId}>{label}</label>
+          {info && <Help title={label}>{info}</Help>}
+        </div>
+      )}
       <Tag
         ref={ref}
         id={inputId}

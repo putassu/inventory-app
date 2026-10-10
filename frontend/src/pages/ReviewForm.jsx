@@ -1,13 +1,21 @@
+import { randomId } from '../utils/id'
 import { useEffect, useRef, useState } from 'react'
 import { useParams, Link, useBlocker } from 'react-router-dom'
 import { allPages, api, write } from '../api/client'
-import { submitConfirmation } from '../api/confirmations'
+import { onConfirmation, submitConfirmation, waitForConfirmation } from '../api/confirmations'
 import { ReviewField, supportedControls } from '../components/review/ReviewField'
+import { ChangePreview } from '../components/review/ChangePreview'
 import { Button } from '../components/ui/Button'
 import { Modal } from '../components/ui/Modal'
 import { Thumbnail } from '../components/ui/Thumbnail'
-import { normalizeDecimal } from '../utils/quantity'
 import { label } from '../utils/labels'
+import {
+  fieldValue,
+  reviewFields,
+  primaryField,
+  reviewValue,
+  activeWarnings,
+} from '../utils/review'
 
 export function ReviewForm() {
   const { id } = useParams()
@@ -21,8 +29,22 @@ function ReviewEditor({ id }) {
   const [busy, setBusy] = useState(false)
   const [conflict, setConflict] = useState(false)
   const [receipt, setReceipt] = useState(null)
+  const [photo, setPhoto] = useState(null)
   const patchAttempt = useRef(null)
   const locked = useRef(false)
+  useEffect(
+    () =>
+      onConfirmation((updated) => {
+        if (updated.confirmation_id !== receipt?.confirmation_id) return
+        setReceipt(updated)
+        if (updated.status === 'applied') {
+          setError('')
+          setChanges({})
+          setReview((previous) => ({ ...previous, status: 'applied' }))
+        }
+      }),
+    [receipt?.confirmation_id],
+  )
   useEffect(() => {
     const controller = new AbortController()
     async function load() {
@@ -52,6 +74,22 @@ function ReviewEditor({ id }) {
       if (!controller.signal.aborted) {
         setReview(document)
         setReferences({ locations: locations.items, units: units.items, items, aliases })
+        if (document.confirmation) {
+          setReceipt(document.confirmation)
+          waitForConfirmation(document.confirmation)
+            .then((result) => {
+              if (!controller.signal.aborted) {
+                setReceipt(result)
+                setReview((previous) => ({ ...previous, status: 'applied' }))
+              }
+            })
+            .catch((cause) => {
+              if (!controller.signal.aborted && cause.name !== 'AbortError') {
+                if (!cause.pending) setError(cause.message)
+                if (cause.confirmation) setReceipt(cause.confirmation)
+              }
+            })
+        }
       }
     }
     load().catch((cause) => {
@@ -84,17 +122,30 @@ function ReviewEditor({ id }) {
       !review.form?.fields?.length ||
       review.form.fields.some((field) => !supportedControls.has(field.control)))
   function changeList() {
-    return Object.values(changes).map((change) => {
+    const result = Object.values(changes).map((change) => {
       const field = review.form.fields.find(
         (field) => field.action_id === change.action_id && field.key === change.key,
       )
       return {
         ...change,
-        value: ['number_stepper', 'decimal_input'].includes(field?.control)
-          ? normalizeDecimal(change.value)
-          : change.value,
+        value: reviewValue(field, change.value),
       }
     })
+    for (const action of review.actions) {
+      const values = { ...action.values }
+      for (const change of result)
+        if (change.action_id === action.action_id) values[change.key] = change.value
+      if (
+        ['receive_stock', 'verify_item'].includes(action.type) &&
+        values.item_mode === 'create' &&
+        values.category === 'clothing' &&
+        values.unit_code === 'pair' &&
+        !values.attributes?.counting_unit &&
+        !Object.hasOwn(values, 'attributes.counting_unit')
+      )
+        result.push({ action_id: action.action_id, key: 'attributes.counting_unit', value: 'pair' })
+    }
+    return result
   }
   async function submit(confirm) {
     if (locked.current) return
@@ -114,7 +165,7 @@ function ReviewEditor({ id }) {
       } else {
         const signature = JSON.stringify(body)
         if (patchAttempt.current?.signature !== signature)
-          patchAttempt.current = { signature, key: crypto.randomUUID() }
+          patchAttempt.current = { signature, key: randomId() }
         const updated = await write(
           `/proposals/${review.proposal_id}`,
           body,
@@ -123,15 +174,17 @@ function ReviewEditor({ id }) {
         )
         setReview(updated)
         setChanges({})
+        setConflict(false)
         patchAttempt.current = null
       }
     } catch (cause) {
-      setError(cause.message)
+      if (cause.pending) setChanges({})
+      else setError(cause.message)
       if (cause.confirmation) setReceipt(cause.confirmation)
       if (cause.review || cause.confirmation?.status === 'conflict') {
         const updated = cause.review || (await api(`/proposals/${review.proposal_id}`))
         setReview(updated)
-        setConflict(true)
+        setConflict(cause.code !== 'REVIEW_VALIDATION_FAILED')
       }
     } finally {
       setBusy(false)
@@ -150,7 +203,57 @@ function ReviewEditor({ id }) {
       setBusy(false)
     }
   }
-  const readonly = busy || (review && review.status !== 'editable')
+  const readonly =
+    busy ||
+    ['queued', 'applying'].includes(receipt?.status) ||
+    (review && review.status !== 'editable')
+  function changeField(action, field, value) {
+    setError('')
+    setChanges((previous) => {
+      const next = { ...previous }
+      const set = (key, value) => {
+        next[`${action.action_id}:${key}`] = { action_id: action.action_id, key, value }
+      }
+      set(field.key, value)
+      if (['receive_stock', 'verify_item'].includes(action.type) && field.key === 'tracking_mode') {
+        const untracked = value === 'untracked'
+        set('quantity_state', untracked ? 'not_applicable' : 'exact')
+        set('quantity', untracked ? null : '1')
+        set('unit_code', untracked ? null : 'pcs')
+      }
+      if (field.key === 'quantity_state' && ['unknown', 'not_applicable'].includes(value))
+        set('quantity', null)
+      if (field.key === 'item_id') set('lot_id', null)
+      return next
+    })
+  }
+  function renderField(action, field) {
+    const key = `${field.action_id}:${field.key}`
+    const current = fieldValue(action, field, {})
+    const itemId = changes[`${action.action_id}:item_id`]?.value ?? action.values.item_id
+    const scoped =
+      action.type === 'receive_stock' && field.key === 'lot_id' && itemId
+        ? { ...references, items: references.items.filter((item) => item.id === itemId) }
+        : references
+    return (
+      <div key={key}>
+        <ReviewField
+          field={field}
+          value={fieldValue(action, field, changes)}
+          references={scoped}
+          onChange={(value) => changeField(action, field, value)}
+        />
+        {conflict && changes[key] && (
+          <small>
+            На сервере:{' '}
+            {typeof current === 'object'
+              ? JSON.stringify(current)
+              : String(current ?? 'Не указано')}
+          </small>
+        )}
+      </div>
+    )
+  }
   return (
     <section className="page-stack review-page">
       <Link to="/review">← Очередь проверки</Link>
@@ -178,31 +281,72 @@ function ReviewEditor({ id }) {
           <p className="notice">
             {label(review.effective_privacy)} ·{' '}
             {review.status === 'editable'
-              ? 'Предложение ещё не сохранено в учёте'
+              ? review.actions.some((action) => action.type === 'verify_item')
+                ? 'Новые вещи уже в каталоге и участвуют в поиске и напоминаниях. Проверьте сведения, когда удобно.'
+                : 'Изменение существующего учёта ожидает подтверждения'
               : label(review.status)}
           </p>
           {!!review.media?.length && (
             <div className="toolbar">
-              {review.media.map((media) => (
-                <Thumbnail
+              {review.media.map((media, index) => (
+                <Button
                   key={media.media_id}
-                  mediaId={media.media_id}
-                  size={100}
-                  alt="Источник предложения"
-                />
+                  variant="secondary"
+                  aria-label={`Открыть фото источника ${index + 1}`}
+                  onClick={() => setPhoto(media.media_id)}
+                >
+                  <Thumbnail mediaId={media.media_id} size={100} alt={`Фото ${index + 1}`} />
+                </Button>
               ))}
             </div>
           )}
-          {review.warnings?.map((warning, index) => (
+          <Modal isOpen={!!photo} title="Фото источника" onClose={() => setPhoto(null)}>
+            {photo && <Thumbnail mediaId={photo} full alt="Фото источника" />}
+          </Modal>
+          {activeWarnings(review, changes).map((warning, index) => (
             <p key={index} className="notice">
               {typeof warning === 'string' ? warning : warning.message}
             </p>
           ))}
-          {review.blocking_issues?.map((issue, index) => (
-            <p key={index} className="error">
-              {issue.message}
-            </p>
-          ))}
+          {review.blocking_issues
+            ?.filter((issue) => {
+              const decision = review.required_decisions?.find(
+                (d) => d.action_id === issue.action_id && d.code === issue.code,
+              )
+              return (
+                !decision ||
+                !decision.options.some(
+                  (option) =>
+                    option.value === changes[`${decision.action_id}:${decision.key}`]?.value,
+                )
+              )
+            })
+            .map((issue, index) => (
+              <div key={index} className="notice">
+                <p>{issue.message}</p>
+                {issue.code === 'DUPLICATE_CANDIDATE' && (
+                  <div className="actions">
+                    <Button
+                      disabled={readonly}
+                      onClick={() =>
+                        changeField(
+                          review.actions.find((action) => action.action_id === issue.action_id),
+                          { key: 'separate_item' },
+                          true,
+                        )
+                      }
+                    >
+                      Это другая вещь — создать отдельно
+                    </Button>
+                    {issue.candidate_ids.map((itemId) => (
+                      <Link key={itemId} className="btn btn-secondary" to={`/items/${itemId}`}>
+                        Открыть имеющуюся вещь
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
           {unsupported && (
             <p role="alert" className="error">
               Версия формы или её поля не поддерживаются. Подтверждение отключено.
@@ -217,50 +361,46 @@ function ReviewEditor({ id }) {
               <Button onClick={() => setConflict(false)}>Я проверил изменения</Button>
             </div>
           )}
-          <fieldset disabled={readonly || unsupported} className="form-grid">
-            {review.form?.fields?.map((field) => {
-              const key = `${field.action_id}:${field.key}`
-              const action = review.actions.find((action) => action.action_id === field.action_id)
-              const current = Object.hasOwn(action?.values || {}, field.key)
-                ? action.values[field.key]
-                : field.value
-              const value = changes[key] ? changes[key].value : current
-              return (
-                <div key={key}>
-                  <ReviewField
-                    field={field}
-                    value={value}
-                    references={references}
-                    onChange={(value) =>
-                      setChanges((previous) => ({
-                        ...previous,
-                        [key]: { action_id: field.action_id, key: field.key, value },
-                      }))
-                    }
-                  />
-                  {conflict && changes[key] && (
-                    <small>
-                      На сервере:{' '}
-                      {typeof current === 'object'
-                        ? JSON.stringify(current)
-                        : String(current ?? 'Не указано')}
-                    </small>
-                  )}
+          {review.actions.map((action, index) => {
+            const fields = reviewFields(action, review.form?.fields || [], changes)
+            const primary = fields.filter(primaryField)
+            const secondary = fields.filter((field) => !primaryField(field))
+            return (
+              <fieldset
+                key={action.action_id}
+                disabled={readonly || unsupported}
+                className="card page-stack"
+              >
+                <legend>
+                  {review.actions.length > 1 ? `${index + 1}. ` : ''}
+                  {label(action.type)}
+                </legend>
+                <div className="form-grid">
+                  {primary.map((field) => renderField(action, field))}
                 </div>
-              )
-            })}
-          </fieldset>
+                {!!secondary.length && (
+                  <details>
+                    <summary>Дополнительные сведения</summary>
+                    <div className="form-grid">
+                      {secondary.map((field) => renderField(action, field))}
+                    </div>
+                  </details>
+                )}
+              </fieldset>
+            )
+          })}
           <details>
             <summary>Что изменится</summary>
             {review.actions.map((action) => (
               <div key={action.action_id}>
                 <h3>{label(action.type)}</h3>
                 {action.preview?.changes?.map((change, index) => (
-                  <div className="before-after" key={index}>
-                    <pre>{JSON.stringify(change.before, null, 2) || 'Новая запись'}</pre>
-                    <span>→</span>
-                    <pre>{JSON.stringify(change.after, null, 2) || 'Удаление'}</pre>
-                  </div>
+                  <ChangePreview
+                    key={index}
+                    before={change.before}
+                    after={change.after}
+                    locations={references.locations}
+                  />
                 ))}
               </div>
             ))}
@@ -270,7 +410,7 @@ function ReviewEditor({ id }) {
               {
                 {
                   applied: 'Сохранено',
-                  queued: 'Подтверждено, ожидает сохранения',
+                  queued: 'Сохраняем. Можно продолжать работу; повторять подтверждение не нужно.',
                   applying: 'Сохраняется',
                   failed: 'Сохранение не завершено',
                   conflict: 'Нужна повторная проверка',
@@ -286,7 +426,7 @@ function ReviewEditor({ id }) {
               disabled={readonly || unsupported || conflict || (!review.can_confirm && !dirty)}
               onClick={() => submit(true)}
             >
-              {busy ? 'Ожидание сохранения…' : 'Подтвердить'}
+              {busy ? 'Сохраняем…' : 'Сохранить'}
             </Button>
             <Button
               variant="secondary"
@@ -295,9 +435,13 @@ function ReviewEditor({ id }) {
             >
               Обновить предпросмотр
             </Button>
-            <Button variant="text" disabled={readonly} onClick={cancel}>
-              Отменить предложение
-            </Button>
+            {review.actions.some((action) => action.type === 'verify_item') ? (
+              <Link to="/items">Проверить позже</Link>
+            ) : (
+              <Button variant="text" disabled={readonly} onClick={cancel}>
+                Отменить предложение
+              </Button>
+            )}
           </div>
         </>
       )}

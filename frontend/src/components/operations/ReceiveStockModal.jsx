@@ -1,39 +1,69 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { api } from '../../api/client'
 import { receiveStock } from '../../api/commands'
 import { normalizeDecimal } from '../../utils/quantity'
 import { useResource } from '../../hooks/useResource'
+import { usePhotoUpload } from '../../hooks/usePhotoUpload'
 import { Modal } from '../ui/Modal'
+import { MediaCapture } from '../ui/MediaCapture'
 import { Button } from '../ui/Button'
 import { Input } from '../ui/Input'
 import { Select } from '../ui/Select'
 import { ReviewField } from '../review/ReviewField'
+import { setCaptureDraft } from '../../utils/captureDraft'
+import { OcrInput } from '../OcrInput'
+import { useTasks } from '../../contexts/TaskContext'
+import { randomId } from '../../utils/id'
+import {
+  fieldVisible,
+  isItemProperty,
+  optionalKeys,
+  valueAt,
+  withField,
+} from '../../utils/itemFields'
 
 export function ReceiveStockModal(props) {
   return props.isOpen ? <ReceiveForm {...props} /> : null
 }
-function ReceiveForm({ onClose, onSuccess, item = null, locations = [] }) {
+function ReceiveForm({
+  onClose,
+  onSuccess,
+  item = null,
+  locations = [],
+  initialLocationId = '',
+  initialName = '',
+  initialPhotos = [],
+  showCaptureLink = true,
+}) {
   const [values, setValues] = useState({
-    item_name: item?.name || '',
+    item_name: item?.name || initialName,
     category: item?.primary_category || 'other',
     tracking_mode: item?.tracking_mode || 'counted',
-    unit_code: item?.base_unit_id || 'pcs',
+    unit_code: item?.attributes?.counting_unit === 'pair' ? 'pair' : item?.base_unit_id || 'pcs',
     quantity: '1',
     quantity_state: item?.tracking_mode === 'untracked' ? 'not_applicable' : 'exact',
     quantity_step: String(item?.quantity_step || '1'),
-    location_id: '',
-    lot_mode: 'create',
+    location_id: initialLocationId,
     attributes: {},
+    custom_attributes: {},
     privacy_policy: item?.privacy_policy || 'local_only',
   })
   const [fields, setFields] = useState([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [duplicate, setDuplicate] = useState(false)
+  const [ocrBusy, setOcrBusy] = useState(false)
+  const [modelPreference, setModelPreference] = useState('local')
+  const [uncertain, setUncertain] = useState(false)
+  const attempt = useRef(null)
   const submitting = useRef(false)
-  const navigate = useNavigate()
+  const { addTask } = useTasks()
+  const photo = usePhotoUpload(initialPhotos)
+  const recognize = !item && !values.item_name.trim() && photo.photos.length > 0
   const { data: units } = useResource('/reference/units')
   const { data: categories } = useResource('/reference/categories')
+  const { data: capabilities } = useResource('/capabilities')
   useEffect(() => {
     const controller = new AbortController()
     api(`/forms?operation=receive_stock&category=${values.category}`, { signal: controller.signal })
@@ -43,26 +73,51 @@ function ReceiveForm({ onClose, onSuccess, item = null, locations = [] }) {
       })
     return () => controller.abort()
   }, [values.category])
-  const set = (key, value) => setValues((previous) => ({ ...previous, [key]: value }))
+  const set = (key, value) => {
+    setError('')
+    if (key === 'item_name') setDuplicate(false)
+    setValues((previous) => ({ ...previous, [key]: value }))
+  }
   function attribute(field, value) {
-    const path = field.key.split('.').slice(1)
-    setValues((previous) => {
-      const attributes = structuredClone(previous.attributes)
-      if (path.length === 2)
-        attributes[path[0]] = { ...(attributes[path[0]] || {}), [path[1]]: value }
-      else if (value === null) delete attributes[path[0]]
-      else attributes[path[0]] = value
-      return { ...previous, attributes }
-    })
+    setValues((previous) => withField(previous, field.key, value))
   }
   async function submit(event) {
     event.preventDefault()
-    if (submitting.current) return
+    if (submitting.current || photo.preparing || ocrBusy) return
     submitting.current = true
     setBusy(true)
     setError('')
     try {
-      if (!item && !values.item_name.trim()) throw new Error('Укажите название вещи.')
+      if (!item && !values.item_name.trim()) {
+        if (!photo.photos.length)
+          throw new Error('Укажите название вещи или прикрепите фото для распознавания.')
+        const media_ids = await photo.upload(
+          modelPreference === 'cloud' ? 'cloud_allowed' : 'local_only',
+        )
+        const body = {
+          input_mode: 'photo',
+          text: 'Добавить новую вещь по фотографии.',
+          media_ids,
+          context: { location_id: values.location_id || null },
+          privacy: { force_local: modelPreference === 'local', model_preference: modelPreference },
+        }
+        const signature = JSON.stringify(body)
+        if (attempt.current?.signature !== signature)
+          attempt.current = {
+            signature,
+            key: randomId(),
+            body: { ...body, client_request_id: randomId() },
+          }
+        const task = await api('/tasks', {
+          method: 'POST',
+          key: attempt.current.key,
+          body: attempt.current.body,
+        })
+        addTask(task)
+        onSuccess?.(task)
+        onClose()
+        return
+      }
       const untracked = values.tracking_mode === 'untracked'
       const quantityState = untracked ? 'not_applicable' : values.quantity_state
       const quantity = ['unknown', 'not_applicable'].includes(quantityState)
@@ -78,112 +133,129 @@ function ReceiveForm({ onClose, onSuccess, item = null, locations = [] }) {
         attributes,
         item_mode: item ? 'existing' : 'create',
         item_id: item?.id,
+        lot_mode: 'create',
         location_id: values.location_id || null,
         unit_code: untracked ? null : values.unit_code,
         quantity,
         quantity_state: quantityState,
         quantity_step: normalizeDecimal(values.quantity_step),
         privacy_policy: values.category === 'document' ? 'local_only' : values.privacy_policy,
+        media_ids: await photo.upload(),
       }
-      if (body.expiry_on && body.expiry_precision === 'month' && body.expiry_on.length === 7)
-        body.expiry_on += '-01'
-      if (!body.expiry_on) body.expiry_precision = 'unknown'
+      body.expiry_precision = body.expiry_on ? 'day' : 'unknown'
       const result = await receiveStock(body, item ? { [`item:${item.id}`]: item.version } : {})
       onSuccess?.(result)
       onClose()
     } catch (cause) {
-      if (cause.review?.proposal_id) {
+      if (cause.pending) {
         onClose()
-        navigate(`/review/${cause.review.proposal_id}`)
-      } else setError(cause.message)
+        return
+      }
+      setUncertain(!!attempt.current && (!cause.status || cause.status >= 500))
+      if (cause.status >= 400 && cause.status < 500 && cause.status !== 429) attempt.current = null
+      setDuplicate(
+        cause.review?.blocking_issues?.some((issue) => issue.code === 'DUPLICATE_CANDIDATE') ||
+          false,
+      )
+      setError(cause.message)
     } finally {
       setBusy(false)
       submitting.current = false
     }
   }
+  const reference = { locations, units: units?.items || [], items: item ? [item] : [] }
   const optional = fields.filter(
     (field) =>
-      !field.key.startsWith('attributes.') &&
-      [
-        'brand',
-        'model',
-        'barcode',
-        'user_description',
-        'tags',
-        'label',
-        'serial_number',
-        'manufacturer_batch',
-        'acquired_at',
-        'manufactured_on',
-        'opened_on',
-        'after_opening_amount',
-        'after_opening_unit',
-        'package_size',
-        'privacy_policy',
-      ].includes(field.key),
+      (isItemProperty(field.key) || optionalKeys.has(field.key)) && fieldVisible(field, values),
   )
-  const reference = { locations, units: units?.items || [], items: item ? [item] : [] }
+  const context = new URLSearchParams()
+  if (item) context.set('item_id', item.id)
+  if (values.location_id) context.set('location_id', values.location_id)
   return (
     <Modal
       isOpen
       busy={busy}
       onClose={onClose}
-      title={item ? `Поступление: ${item.name}` : 'Поступление вручную'}
+      title={item ? `Пополнить: ${item.name}` : 'Добавить вещь'}
     >
       <form className="page-stack" onSubmit={submit}>
-        <fieldset disabled={busy} className="page-stack">
+        <fieldset disabled={busy || uncertain} className="page-stack">
           {error && (
             <p className="error" role="alert">
               {error}
             </p>
           )}
-          {!item && (
-            <>
-              <Input
-                label="Название вещи"
-                required
-                value={values.item_name}
-                onChange={(event) => set('item_name', event.target.value)}
+          {duplicate && (
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={!!values.separate_item}
+                onChange={(event) => set('separate_item', event.target.checked)}
               />
+              Это другая вещь — создать отдельную карточку
+            </label>
+          )}
+          <MediaCapture
+            {...photo.capture}
+            onMediaCaptured={(media) => {
+              photo.capture.onMediaCaptured(media)
+              setError('')
+            }}
+            disabled={busy || ocrBusy}
+            maxPhotos={capabilities?.media_limits?.max_images || 3}
+          />
+          {!item && !fields.find((field) => field.key === 'ocr_text')?.hidden && (
+            <OcrInput
+              photo={photo}
+              value={values.ocr_text}
+              onChange={(text) => set('ocr_text', text)}
+              disabled={busy}
+              onBusyChange={setOcrBusy}
+            />
+          )}
+          {!item && (
+            <Input
+              label="Название вещи"
+              autoFocus
+              value={values.item_name}
+              onChange={(event) => set('item_name', event.target.value)}
+              placeholder="Например, носки или зарядное устройство"
+            />
+          )}
+          {recognize && (
+            <>
+              <p className="notice">
+                Название не заполнено — запустим распознавание фото. Модель определит название,
+                количество и свойства; выбранное место сохранится. Карточка появится сразу со
+                статусом обработки.
+              </p>
               <Select
-                label="Категория"
-                value={values.category}
-                onChange={(event) =>
-                  setValues((previous) => ({
-                    ...previous,
-                    category: event.target.value,
-                    attributes: {},
-                    privacy_policy:
-                      event.target.value === 'document' ? 'local_only' : previous.privacy_policy,
-                  }))
-                }
+                label="Модель распознавания"
+                value={modelPreference}
+                info="Локальная — доверенный сервер владельца. При выборе облака первичная проверка всё равно локальная. Чувствительные материалы и места с запретом облака остаются локально."
+                onChange={(event) => setModelPreference(event.target.value)}
               >
-                {categories?.items.map((category) => (
-                  <option key={category.code} value={category.code}>
-                    {category.name}
-                  </option>
-                ))}
-              </Select>
-              <Select
-                label="Режим учёта"
-                value={values.tracking_mode}
-                onChange={(event) =>
-                  setValues((previous) => ({
-                    ...previous,
-                    tracking_mode: event.target.value,
-                    quantity_state: event.target.value === 'untracked' ? 'not_applicable' : 'exact',
-                  }))
-                }
-              >
-                <option value="counted">По количеству</option>
-                <option value="measured">По мере</option>
-                <option value="individual">Уникальный экземпляр</option>
-                <option value="untracked">Только наличие</option>
+                <option value="local">Локальная — доверенный сервер</option>
+                <option
+                  value="cloud"
+                  disabled={!capabilities?.cloud_configured || !capabilities?.external_enabled}
+                >
+                  Облачная — после проверки приватности
+                </option>
               </Select>
             </>
           )}
-          {values.tracking_mode !== 'untracked' && (
-            <>
+          {!recognize && values.tracking_mode !== 'untracked' && (
+            <div className="quantity-fields">
+              {values.quantity_state !== 'unknown' && (
+                <Input
+                  label="Количество"
+                  required
+                  inputMode="decimal"
+                  value={values.quantity}
+                  onChange={(event) => set('quantity', event.target.value)}
+                />
+              )}
               <Select
                 label="Единица"
                 value={values.unit_code}
@@ -195,33 +267,7 @@ function ReceiveForm({ onClose, onSuccess, item = null, locations = [] }) {
                   </option>
                 ))}
               </Select>
-              <Select
-                label="Точность количества"
-                value={values.quantity_state}
-                onChange={(event) => set('quantity_state', event.target.value)}
-              >
-                <option value="exact">Точное</option>
-                <option value="estimated">Примерное</option>
-                <option value="unknown">Неизвестно</option>
-              </Select>
-              {values.quantity_state !== 'unknown' && (
-                <Input
-                  label="Количество"
-                  required
-                  inputMode="decimal"
-                  value={values.quantity}
-                  onChange={(event) => set('quantity', event.target.value)}
-                />
-              )}
-              {!item && (
-                <Input
-                  label="Шаг базового количества"
-                  value={values.quantity_step}
-                  inputMode="decimal"
-                  onChange={(event) => set('quantity_step', event.target.value)}
-                />
-              )}
-            </>
+            </div>
           )}
           <Select
             label="Место хранения"
@@ -229,122 +275,123 @@ function ReceiveForm({ onClose, onSuccess, item = null, locations = [] }) {
             onChange={(event) => set('location_id', event.target.value)}
           >
             <option value="">Место не указано</option>
-            {locations.map((location) => (
-              <option key={location.id} value={location.id}>
-                {location.full_path}
-              </option>
-            ))}
+            {locations
+              .filter((location) => location.kind !== 'system_unspecified')
+              .map((location) => (
+                <option key={location.id} value={location.id}>
+                  {location.full_path || location.name}
+                </option>
+              ))}
           </Select>
-          {item && (
-            <>
-              <Select
-                label="Партия"
-                value={values.lot_mode}
-                onChange={(event) => set('lot_mode', event.target.value)}
-              >
-                <option value="create">Новая партия</option>
-                <option value="existing">Существующая партия</option>
-              </Select>
-              {values.lot_mode === 'existing' && (
-                <Select
-                  label="Выберите партию"
-                  required
-                  value={values.lot_id || ''}
-                  onChange={(event) => set('lot_id', event.target.value)}
-                >
-                  <option value="">Выберите</option>
-                  {item.lots
-                    .filter((lot) => !lot.archived_at)
-                    .map((lot) => (
-                      <option key={lot.id} value={lot.id}>
-                        {lot.label || lot.serial_number || lot.id.slice(0, 8)}
-                      </option>
-                    ))}
-                </Select>
-              )}
-            </>
-          )}
-          {values.lot_mode === 'create' && (
-            <>
-              <Select
-                label="Точность срока годности"
-                value={values.expiry_precision || 'unknown'}
-                onChange={(event) => {
-                  set('expiry_precision', event.target.value)
-                  set('expiry_on', null)
-                }}
-              >
-                <option value="unknown">Неизвестно</option>
-                <option value="day">День</option>
-                <option value="month">Месяц</option>
-              </Select>
-              {['day', 'month'].includes(values.expiry_precision) && (
-                <Input
-                  type={values.expiry_precision === 'month' ? 'month' : 'date'}
-                  label="Годен до"
-                  value={values.expiry_on || ''}
-                  onChange={(event) => set('expiry_on', event.target.value)}
-                />
-              )}
-            </>
-          )}
-          {!item &&
-            fields
-              .filter((field) => field.key.startsWith('attributes.'))
-              .map((field) => {
-                const value = field.key
-                  .split('.')
-                  .slice(1)
-                  .reduce((current, key) => current?.[key], values.attributes)
-                return (
-                  <ReviewField
-                    key={field.key}
-                    field={field}
-                    value={value}
-                    references={reference}
-                    onChange={(value) => attribute(field, value)}
+          {!recognize && (
+            <details>
+              <summary>Категория, срок и другие сведения</summary>
+              <div className="page-stack">
+                {!item && (
+                  <>
+                    <Select
+                      label="Категория"
+                      value={values.category}
+                      onChange={(event) =>
+                        setValues((previous) => ({
+                          ...previous,
+                          category: event.target.value,
+                          attributes: {},
+                        }))
+                      }
+                    >
+                      {categories?.items.map((category) => (
+                        <option key={category.code} value={category.code}>
+                          {category.name}
+                        </option>
+                      ))}
+                    </Select>
+                    <Select
+                      label="Как учитывать"
+                      value={values.tracking_mode}
+                      onChange={(event) =>
+                        setValues((previous) => ({
+                          ...previous,
+                          tracking_mode: event.target.value,
+                          quantity_state:
+                            event.target.value === 'untracked' ? 'not_applicable' : 'exact',
+                          quantity_step: event.target.value === 'measured' ? '0.001' : '1',
+                          unit_code: event.target.value === 'measured' ? 'g' : 'pcs',
+                          quantity: '1',
+                        }))
+                      }
+                    >
+                      <option value="counted">По количеству</option>
+                      <option value="measured">По весу или объёму</option>
+                      <option value="individual">Уникальная вещь</option>
+                      <option value="untracked">Только наличие</option>
+                    </Select>
+                  </>
+                )}
+                {values.tracking_mode !== 'untracked' && (
+                  <Select
+                    label="Точность количества"
+                    value={values.quantity_state}
+                    onChange={(event) => set('quantity_state', event.target.value)}
+                  >
+                    <option value="exact">Точное</option>
+                    <option value="estimated">Примерное</option>
+                    <option value="unknown">Неизвестно</option>
+                  </Select>
+                )}
+                {(!fields.find((field) => field.key === 'expiry_on')?.hidden ||
+                  values.expiry_on) && (
+                  <Input
+                    type="date"
+                    label="Годен до (необязательно)"
+                    value={values.expiry_on || ''}
+                    onChange={(event) => set('expiry_on', event.target.value)}
                   />
-                )
-              })}
-          <details>
-            <summary>Дополнительно</summary>
-            <div className="page-stack">
-              {optional
-                .filter(
-                  (field) =>
-                    !(
-                      item &&
-                      [
-                        'brand',
-                        'model',
-                        'barcode',
-                        'user_description',
-                        'tags',
-                        'privacy_policy',
-                      ].includes(field.key)
-                    ),
-                )
-                .map((field) => (
-                  <ReviewField
-                    key={field.key}
-                    field={{
-                      ...field,
-                      editable: !(field.key === 'privacy_policy' && values.category === 'document'),
-                    }}
-                    references={reference}
-                    value={values[field.key] ?? field.value}
-                    onChange={(value) => set(field.key, value)}
-                  />
-                ))}
-            </div>
-          </details>
-          <Button type="submit" disabled={busy}>
-            {busy ? 'Подтверждено, ожидаем сохранения…' : 'Сохранить поступление'}
-          </Button>
-          <Link to={`/capture${item ? `?item_id=${item.id}` : ''}`} onClick={onClose}>
-            Распознать по фото или голосу
-          </Link>
+                )}
+                {!item &&
+                  optional.map((field) => (
+                    <ReviewField
+                      key={field.key}
+                      field={field}
+                      references={reference}
+                      value={valueAt(values, field.key)}
+                      onChange={(value) =>
+                        isItemProperty(field.key) ? attribute(field, value) : set(field.key, value)
+                      }
+                    />
+                  ))}
+              </div>
+            </details>
+          )}
+          {showCaptureLink && !uncertain && (
+            <Link
+              to={`/capture?${context}`}
+              onClick={() => {
+                setCaptureDraft({ photos: photo.photos, text: item ? '' : values.item_name })
+                onClose()
+              }}
+            >
+              Заполнить по фото или голосу
+            </Link>
+          )}
         </fieldset>
+        {uncertain && (
+          <p className="notice">
+            Сервер мог уже принять задачу. Повторите отправку: проверим тот же запрос без создания
+            второй вещи.
+          </p>
+        )}
+        <Button type="submit" disabled={busy || photo.preparing || ocrBusy}>
+          {busy
+            ? recognize
+              ? 'Отправляем на распознавание…'
+              : 'Сохраняем…'
+            : uncertain
+              ? 'Повторить отправку'
+              : item
+                ? 'Пополнить'
+                : 'Добавить вещь'}
+        </Button>
       </form>
     </Modal>
   )

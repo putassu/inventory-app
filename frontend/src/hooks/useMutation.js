@@ -1,3 +1,4 @@
+import { randomId } from '../utils/id'
 import { useRef, useState } from 'react'
 import { write } from '../api/client'
 export function useMutation() {
@@ -8,7 +9,7 @@ export function useMutation() {
     if (attempt.current?.running) return null
     const signature = JSON.stringify([path, body, method])
     if (attempt.current?.signature !== signature)
-      attempt.current = { signature, key: crypto.randomUUID() }
+      attempt.current = { signature, key: randomId() }
     const current = attempt.current
     current.running = true
     setBusy(true)

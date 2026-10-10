@@ -1,3 +1,4 @@
+import { randomId } from '../utils/id'
 import { apiCall } from './client'
 
 /**
@@ -11,7 +12,7 @@ export async function uploadMedia(
   file,
   privacyPolicy = 'local_only',
   clientPreprocessed = true,
-  key = crypto.randomUUID(),
+  key = randomId(),
 ) {
   const formData = new FormData()
   formData.append('file', file)

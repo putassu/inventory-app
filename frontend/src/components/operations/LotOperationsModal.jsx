@@ -5,6 +5,7 @@ import { Input } from '../ui/Input'
 import { Select } from '../ui/Select'
 import { useToast } from '../../contexts/ToastContext'
 import { updateLot, splitLot, mergeLots, normalizeDecimal } from '../../api/commands'
+import { unitLabel, scaled } from '../../utils/quantity'
 
 export function LotOperationsModal(props) {
   return props.isOpen ? <Form {...props} /> : null
@@ -25,20 +26,22 @@ function Form({
   const [serialNumber, setSerialNumber] = useState(lot?.serial_number || '')
   const [batch, setBatch] = useState(lot?.manufacturer_batch || '')
   const [expiryOn, setExpiryOn] = useState(lot?.expiry_on || '')
-  const [expiryPrecision, setExpiryPrecision] = useState(lot?.expiry_precision || 'day')
+  const [expiryPrecision, setExpiryPrecision] = useState(lot?.expiry_precision || 'unknown')
   const [openedOn, setOpenedOn] = useState(lot?.opened_on || '')
   const [quantity, setQuantity] = useState('1')
   const [locationId, setLocationId] = useState(
-    item?.balances?.find((row) => row.lot_id === lot?.id)?.location_id || '',
+    item?.balances?.find(
+      (row) => row.lot_id === lot?.id && row.quantity != null && scaled(row.quantity) > 0n,
+    )?.location_id || '',
   )
   const [selectedLotIds, setSelectedLotIds] = useState(lot ? [lot.id] : [])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
 
-  const lots = item?.lots || []
+  const lots = (item?.lots || []).filter((row) => !row.archived_at)
 
   const titles = {
-    update: 'Редактирование партии',
+    update: 'Срок и сведения о вещи',
     split: 'Разделение партии',
     merge: 'Объединение партий',
   }
@@ -65,6 +68,12 @@ function Form({
           expectedVersions[`balance:${balance.id}`] = balance.version
 
       let result
+      const expiry =
+        expiryPrecision === 'unknown' || !expiryOn
+          ? null
+          : expiryPrecision === 'month'
+            ? `${expiryOn.slice(0, 7)}-01`
+            : expiryOn
       if (operation === 'update') {
         result = await updateLot(
           {
@@ -72,8 +81,8 @@ function Form({
             label: label.trim() || null,
             serial_number: serialNumber.trim() || null,
             manufacturer_batch: batch.trim() || null,
-            expiry_on: expiryOn || null,
-            expiry_precision: expiryOn ? expiryPrecision : undefined,
+            expiry_on: expiry,
+            expiry_precision: expiry ? expiryPrecision : 'unknown',
             opened_on: openedOn || null,
           },
           expectedVersions,
@@ -89,8 +98,9 @@ function Form({
             label: label.trim() || null,
             serial_number: serialNumber.trim() || null,
             manufacturer_batch: batch.trim() || null,
-            expiry_on: expiryOn || null,
-            expiry_precision: expiryOn ? expiryPrecision : 'unknown',
+            expiry_on: expiry,
+            expiry_precision: expiry ? expiryPrecision : 'unknown',
+            opened_on: openedOn || null,
           },
           expectedVersions,
         )
@@ -106,6 +116,10 @@ function Form({
       if (onSuccess) onSuccess(result)
       onClose()
     } catch (err) {
+      if (err.pending) {
+        onClose()
+        return
+      }
       setError(err.message || 'Ошибка выполнения действия')
     } finally {
       submitting.current = false
@@ -118,7 +132,7 @@ function Form({
       isOpen={isOpen}
       busy={isLoading}
       onClose={onClose}
-      title={titles[operation] || 'Операция с партией'}
+      title={titles[operation] || 'Сведения о вещи'}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={isLoading}>
@@ -137,6 +151,7 @@ function Form({
         <fieldset disabled={isLoading} className="page-stack">
           {error && (
             <div
+              role="alert"
               style={{
                 padding: 'var(--space-3)',
                 backgroundColor: 'rgba(239, 68, 68, 0.1)',
@@ -192,7 +207,7 @@ function Form({
               {operation === 'split' && (
                 <>
                   <Input
-                    label={`Количество для отделения (${item?.base_unit_id || 'шт.'})`}
+                    label={`Количество для отделения (${unitLabel(item?.base_unit_id) || 'шт.'})`}
                     type="text"
                     inputMode="decimal"
                     value={quantity}
@@ -204,52 +219,64 @@ function Form({
                     value={locationId}
                     onChange={(e) => setLocationId(e.target.value)}
                   >
-                    {locations.map((loc) => (
-                      <option key={loc.id} value={loc.id}>
-                        {loc.full_path || loc.name}
-                      </option>
-                    ))}
+                    {locations
+                      .filter((loc) =>
+                        item?.balances?.some(
+                          (balance) =>
+                            balance.location_id === loc.id &&
+                            balance.lot_id === lot?.id &&
+                            balance.quantity != null &&
+                            scaled(balance.quantity) > 0n,
+                        ),
+                      )
+                      .map((loc) => (
+                        <option key={loc.id} value={loc.id}>
+                          {loc.full_path || loc.name}
+                        </option>
+                      ))}
                   </Select>
                 </>
               )}
 
               <Input
-                label={operation === 'split' ? 'Метка новой партии' : 'Метка партии'}
+                label="Примечание"
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
                 placeholder="Обозначение или примечание"
               />
 
-              <div
-                style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-3)' }}
-              >
+              <div className="form-grid">
                 <Input
                   label="Серийный номер"
                   value={serialNumber}
                   onChange={(e) => setSerialNumber(e.target.value)}
                 />
                 <Input
-                  label="Номер партии (Батч)"
+                  label="Код производителя (необязательно)"
                   value={batch}
                   onChange={(e) => setBatch(e.target.value)}
                 />
               </div>
 
-              <div
-                style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 'var(--space-3)' }}
-              >
+              <div className="form-grid">
                 <Input
                   label="Срок годности"
-                  type="date"
-                  value={expiryOn}
-                  onChange={(e) => setExpiryOn(e.target.value)}
+                  type={expiryPrecision === 'month' ? 'month' : 'date'}
+                  value={expiryPrecision === 'month' ? expiryOn.slice(0, 7) : expiryOn}
+                  onChange={(e) => {
+                    setExpiryOn(e.target.value)
+                    if (expiryPrecision === 'unknown') setExpiryPrecision('day')
+                  }}
                 />
                 <Select
                   label="Точность"
                   value={expiryPrecision}
-                  onChange={(e) => setExpiryPrecision(e.target.value)}
-                  disabled={!expiryOn}
+                  onChange={(e) => {
+                    setExpiryPrecision(e.target.value)
+                    if (e.target.value === 'unknown') setExpiryOn('')
+                  }}
                 >
+                  <option value="unknown">Неизвестно</option>
                   <option value="day">День</option>
                   <option value="month">Месяц</option>
                 </Select>

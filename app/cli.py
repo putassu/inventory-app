@@ -11,7 +11,7 @@ from pathlib import Path
 from sqlalchemy import select, text, update
 
 from app.application.auth import PASSWORDS, bootstrap
-from app.config import get_config
+from app.config import get_config, local_enabled, model_definitions
 from app.db.models import ModelDeployment, Session, User
 from app.db.session import session_factory
 from app.domain.common import canonical, utcnow
@@ -91,27 +91,12 @@ async def model_health(args):
 
 async def sync_models(args):
     config = get_config()
-    definitions = [
-        ("local_vlm", config.local_model, "ollama", "local", None),
-        ("privacy_asr", config.local_model, "ollama", "local", None),
-        ("embeddings", config.embedding_model, "ollama", "local", None),
-        (
-            "local_audio",
-            config.local_audio_model or "unconfigured",
-            "local_audio",
-            "local",
-            "local_audio_key",
-        ),
-        ("cloud_primary", config.cloud_model or "unconfigured", "cloud", "external", "cloud_key"),
-    ]
     async with session_factory()() as db, db.begin():
-        for name, model, endpoint, trust, credential in definitions:
+        for name, model, endpoint, trust, credential in model_definitions(config):
             row = await db.scalar(
                 select(ModelDeployment).where(ModelDeployment.logical_name == name).with_for_update()
             )
-            enabled = trust == "local" and (
-                name != "local_audio" or config.local_audio_trusted and config.local_audio_verified
-            )
+            enabled = trust == "local" and local_enabled(config, endpoint)
             if row is None:
                 db.add(
                     ModelDeployment(
@@ -200,6 +185,13 @@ async def worker_options():
         session_factory.cache_clear()
 
 
+async def materialize_pending(args):
+    from app.application.drafts import materialize_pending
+
+    count = await materialize_pending(session_factory())
+    print(f"Перенесено ожидающих загрузок в каталог: {count}.")
+
+
 def worker(args):
     from arq.worker import run_worker
 
@@ -210,6 +202,8 @@ def worker(args):
         settings = runner.run(worker_options())
         cls = {"cpu": CPUWorker, "ml": MLWorker, "cloud": CloudWorker, "scheduler": Scheduler}[args.role]
         cls.job_timeout = settings["timeout.worker_hard_seconds"]
+        # Часовой heartbeat arq скрывал остановку scheduler от диагностики.
+        cls.health_check_interval = 10
         cls.max_jobs = (
             settings["queue.cpu_concurrency"]
             if args.role == "cpu"
@@ -234,6 +228,7 @@ def main():
     commands.add_parser("verify-prompts")
     commands.add_parser("model-health")
     commands.add_parser("sync-models")
+    commands.add_parser("materialize-pending-items")
     worker_parser = commands.add_parser("worker")
     worker_parser.add_argument("role", choices=["cpu", "ml", "cloud", "scheduler"])
     legacy = commands.add_parser("legacy-preview")
@@ -267,6 +262,7 @@ def main():
                 "reset-password": reset_password,
                 "model-health": model_health,
                 "sync-models": sync_models,
+                "materialize-pending-items": materialize_pending,
                 "legacy-preview": legacy_preview,
             }[args.command](args)
         )

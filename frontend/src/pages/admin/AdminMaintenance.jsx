@@ -5,6 +5,7 @@ import { useJob } from '../../hooks/useJob'
 import { useMutation } from '../../hooks/useMutation'
 import { Button } from '../../components/ui/Button'
 import { label } from '../../utils/labels'
+import { Help } from '../../components/ui/Help'
 export function AdminMaintenance() {
   const health = useResource('/admin/health'),
     metrics = useResource('/admin/metrics'),
@@ -25,7 +26,14 @@ export function AdminMaintenance() {
       ))}
       {mutation.error && <p role="alert">{mutation.error}</p>}
       <section className="card">
-        <h3>Сервисы</h3>
+        <h3 className="field-label">
+          Сервисы{' '}
+          <Help title="Доступность сервисов">
+            Проверка API, хранилищ и heartbeat обработчиков. Доступный API ещё не означает, что
+            сохраняющий CPU worker, планировщик или ML worker работают. Эта сводка не запускает
+            реальное распознавание и не доказывает, что удалённая модель свободна.
+          </Help>
+        </h3>
         {Object.entries(health.data || {}).map(([name, value]) => (
           <p key={name}>
             {name}:{' '}
@@ -51,7 +59,15 @@ export function AdminMaintenance() {
         <pre>{JSON.stringify(metrics.data, null, 2)}</pre>
       </details>
       <section className="card stack">
-        <h3>Поисковый индекс</h3>
+        <h3 className="field-label">
+          Поисковый индекс{' '}
+          <Help title="Перестроение поискового индекса">
+            Фоновая задача повторно индексирует текущий инвентарь и может вызывать модель
+            эмбеддингов. На слабом сервере это существенная нагрузка, даже без нового фото или
+            голоса. Учёт в PostgreSQL остаётся источником данных; повторный запуск не нужен, пока
+            текущая задача не завершилась.
+          </Help>
+        </h3>
         <Button
           disabled={mutation.busy || (jobId && !['succeeded', 'failed'].includes(job.data?.status))}
           onClick={async () => {
@@ -64,7 +80,15 @@ export function AdminMaintenance() {
         {job.data && <p role="status">{label(job.data.status)}</p>}
       </section>
       <section className="card stack">
-        <h3>Очистка по срокам хранения</h3>
+        <h3 className="field-label">
+          Очистка по срокам хранения{' '}
+          <Help title="Очистка данных">
+            Применяет действующие retention-настройки ко всему серверу. Предпросмотр оценивает
+            только непривязанные файлы, а запуск также обрабатывает истёкшие экспорты и другие
+            категории. Физическое удаление не восстанавливается откатом настройки; для
+            восстановления нужна резервная копия.
+          </Help>
+        </h3>
         <p>
           Запускается серверная очистка всех рабочих областей: непривязанные файлы, истёкшие
           экспорты, черновики и другие данные согласно действующим срокам хранения. Предпросмотр
@@ -92,6 +116,11 @@ export function AdminMaintenance() {
                 onChange={(e) => setConfirm(e.target.checked)}
               />{' '}
               Подтверждаю полную серверную очистку по действующим срокам хранения
+              <Help title="Подтверждение очистки">
+                Подтверждение относится ко всем рабочим областям и всем поддержанным категориям
+                очистки, а не только к числу файлов в предпросмотре. Убедитесь, что действующие
+                сроки хранения соответствуют нужному результату.
+              </Help>
             </label>
             <Button
               variant="danger"

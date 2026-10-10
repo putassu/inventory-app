@@ -9,6 +9,7 @@ from app.db.models import (
     Batch,
     Binding,
     Confirmation,
+    GPUSlot,
     Item,
     Location,
     Media,
@@ -31,7 +32,12 @@ def task_view(task):
     return {
         "task_id": task.id,
         "input_mode": task.input_mode,
+        "purpose": task.context.get("purpose", "inventory"),
         "parent_task_id": task.parent_task_id,
+        "context": {key: task.context.get(key) for key in ("item_id", "location_id")},
+        "catalog_item_ids": task.context.get("catalog_item_ids", []),
+        "diagnostics_only": bool(task.context.get("diagnostics_only")),
+        "preview_media_id": next(iter(task.result.get("thumbnail_media_ids", []) or task.media_ids), None),
         "title": " ".join((task.input_text or "").split())[:160]
         or {
             "photo": "Обработка фотографии",
@@ -43,11 +49,21 @@ def task_view(task):
         "status_version": task.status_version,
         "progress": task.progress,
         "proposal_id": task.proposal_id,
-        "result": task.result if task.status == "succeeded" else {},
+        "result": task.result
+        if task.status == "succeeded" or task.context.get("purpose") == "ocr" and task.status == "failed"
+        else {},
         "effective_privacy": task.effective_privacy,
         "batch_id": task.batch_id,
         "config_revision": task.config_revision,
         "error_code": task.error_code,
+        "attempt_count": task.attempt_count,
+        "max_attempts_per_stage": task.config_snapshot.get("retry.max_attempts_per_stage", 3),
+        "can_retry": not task.context.get("superseded_by")
+        and (
+            task.status in {"failed", "cancelled", "expired"}
+            or task.status == "waiting_for_review"
+            and bool(task.error_code)
+        ),
         "can_cancel": task.status in ACTIVE | {"waiting_for_review"},
         "poll_after_ms": 2000 if task.status in ACTIVE | {"applying"} else None,
         "created_at": task.created_at.isoformat(),
@@ -64,7 +80,7 @@ def task_view(task):
     }
 
 
-async def create_task(db, workspace_id, user_id, data, parent_task_id=None):
+async def create_task(db, workspace_id, user_id, data, parent_task_id=None, *, diagnostics_only=False):
     require(
         not data.get("workspace_id") or data["workspace_id"] == workspace_id,
         "WORKSPACE_MISMATCH",
@@ -86,11 +102,36 @@ async def create_task(db, workspace_id, user_id, data, parent_task_id=None):
         )
         return existing
     revision, settings = await effective_settings(db)
+    ocr = data.get("purpose") == "ocr"
+    require(
+        not ocr or data["input_mode"] == "photo" and data["media_ids"] and not data.get("audio_media_id"),
+        "INVALID_OCR_INPUT",
+        "Для OCR нужны только фотографии.",
+        422,
+    )
+    if data["input_mode"] != "manual":
+        # Одна блокировка на всё развёртывание: параллельные вкладки не обходят лимит.
+        slot = await db.get(GPUSlot, 1, with_for_update=True)
+        require(
+            not slot or slot.state != "quarantined",
+            "GPU_QUARANTINED",
+            "Распознавание приостановлено после сбоя модели. Можно добавить вещь вручную; сначала восстановите сервер.",
+            409,
+        )
+        pending = await db.scalar(
+            select(func.count()).select_from(Task).where(Task.status.in_(ACTIVE), Task.input_mode != "manual")
+        )
+        require(
+            pending < settings.get("queue.max_pending_total", 1),
+            "ADMISSION_LIMIT",
+            "Сначала дождитесь завершения текущей обработки. Можно добавить вещь вручную.",
+            429,
+        )
     count = await db.scalar(
         select(func.count()).select_from(Task).where(Task.created_by == user_id, Task.status.in_(ACTIVE))
     )
     require(
-        count < settings["queue.max_pending_per_user"],
+        data["input_mode"] == "manual" or count < settings["queue.max_pending_per_user"],
         "ADMISSION_LIMIT",
         "Слишком много ожидающих задач.",
         429,
@@ -135,6 +176,9 @@ async def create_task(db, workspace_id, user_id, data, parent_task_id=None):
         413,
     )
     context = data.get("context", {})
+    if diagnostics_only:
+        context = {**context, "diagnostics_only": True}
+    parent = None
     if parent_task_id:
         parent = await scoped_get(db, Task, parent_task_id, workspace_id)
         require(not parent.context.get("deleted"), "TASK_PURGED", "Материалы исходной задачи удалены.", 410)
@@ -152,6 +196,11 @@ async def create_task(db, workspace_id, user_id, data, parent_task_id=None):
     )
     if user.preferences.get("prefer_local", True):
         settings = {**settings, "routing.strategy": "local_first"}
+    preference = data.get("privacy", {}).get("model_preference", "default")
+    if ocr or preference == "local":
+        force_local = True
+    elif preference == "cloud":
+        settings = {**settings, "routing.strategy": "cloud_preferred"}
     deployments = (await db.scalars(select(ModelDeployment))).all()
     route = {
         row.logical_name: {
@@ -181,7 +230,12 @@ async def create_task(db, workspace_id, user_id, data, parent_task_id=None):
         input_text=data.get("text"),
         media_ids=data["media_ids"],
         audio_media_id=data.get("audio_media_id"),
-        context={**context, "request_hash": digest(data)},
+        context={
+            **context,
+            "purpose": data.get("purpose", "inventory"),
+            "model_preference": preference,
+            "request_hash": digest(data),
+        },
         requested_privacy="local_only" if force_local or "local_only" in policies else "cloud_allowed",
         effective_privacy="local_only",
         config_revision=revision,
@@ -211,6 +265,9 @@ async def create_task(db, workspace_id, user_id, data, parent_task_id=None):
             )
         )
     # PostgreSQL — очередь фактов. Scheduler восстановит dispatch даже без Redis.
+    from app.application.drafts import initialize
+
+    await initialize(db, task, parent)
     return task
 
 
@@ -223,6 +280,9 @@ async def cancel_task(db, task):
     if task.status != "cancelled":
         transition(task, "cancelled")
         task.cancel_requested_at = utcnow()
+        from app.application.drafts import mark_error
+
+        await mark_error(db, task)
         if task.proposal_id:
             proposal = await db.get(Proposal, task.proposal_id)
             proposal.status = "cancelled"

@@ -56,7 +56,7 @@ def validate_item(item):
         "Выберите единицу измерения или учёт присутствия.",
         422,
     )
-    if item.primary_category == "document":
+    if item.primary_category == "document" or getattr(item, "ocr_text", None):
         require(
             item.privacy_policy == "local_only",
             "POLICY_RESTRICTED",

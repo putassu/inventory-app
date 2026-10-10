@@ -3,7 +3,9 @@ export async function compressImage(file, maxSize = 1600, { rotation = 0, crop =
     throw new Error('Поддерживаются JPEG, PNG и WebP.')
   if (file.size > 32 * 1024 * 1024)
     throw new Error('Фото больше 32 МБ. Уменьшите его перед загрузкой.')
-  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' })
+  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => {
+    throw new Error('Не удалось прочитать фото. Файл повреждён или имеет неподдерживаемый формат.')
+  })
   try {
     if (bitmap.width * bitmap.height > 40000000)
       throw new Error('Фото больше 40 мегапикселей. Уменьшите его перед загрузкой.')
@@ -72,13 +74,17 @@ function wav(buffer) {
     const sample = Math.max(-1, Math.min(1, channel[i]))
     view.setInt16(44 + i * 2, sample < 0 ? sample * 32768 : sample * 32767, true)
   }
-  return new File([view], 'recording.wav', { type: 'audio/wav' })
+  return Object.assign(new File([view], 'recording.wav', { type: 'audio/wav' }), {
+    durationSeconds: buffer.duration,
+  })
 }
 export async function prepareAudio(blob, from = 0, to = null) {
   if (blob.size > 32 * 1024 * 1024) throw new Error('Аудиофайл больше 32 МБ.')
   const context = new AudioContext()
   try {
-    const decoded = await context.decodeAudioData(await blob.arrayBuffer())
+    const decoded = await context.decodeAudioData(await blob.arrayBuffer()).catch(() => {
+      throw new Error('Не удалось прочитать аудио. Проверьте формат и целостность файла.')
+    })
     const end = to == null ? decoded.duration : Math.min(to, decoded.duration)
     if (!Number.isFinite(from) || !Number.isFinite(end) || from < 0 || end <= from)
       throw new Error('Проверьте начало и конец обрезки аудио.')

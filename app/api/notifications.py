@@ -6,7 +6,7 @@ from pydantic import Field
 from sqlalchemy import or_, select
 
 from app.api.catalog import page, serialize
-from app.api.deps import database, idempotency_key, scope, write_scope
+from app.api.deps import db_session, idempotency_key, scope, write_scope
 from app.application.idempotency import previous_response, remember
 from app.application.notifications import ReminderValues
 from app.db.models import Location, Notification, Outbox, ReminderRule
@@ -23,7 +23,7 @@ async def notifications(
     limit: int = Query(50, ge=1, le=100),
     cursor: str | None = None,
     selected=Depends(scope),
-    db=Depends(database),
+    db=db_session,
 ):
     return await page(
         db,
@@ -47,7 +47,7 @@ class NotificationPatch(StrictModel):
 
 @router.patch("/notifications/{notification_id}")
 async def update_notification(
-    notification_id: UUID, data: NotificationPatch, selected=Depends(write_scope), db=Depends(database)
+    notification_id: UUID, data: NotificationPatch, selected=Depends(write_scope), db=db_session
 ):
     row = await scoped_get(db, Notification, notification_id, selected.workspace_id)
     require(row.user_id == selected.user.id, "NOT_FOUND", "Уведомление не найдено.", 404)
@@ -71,7 +71,7 @@ async def snooze(
     data: Snooze,
     key=Depends(idempotency_key),
     selected=Depends(write_scope),
-    db=Depends(database),
+    db=db_session,
 ):
     body = data.model_dump()
     operation_scope = f"snooze:{notification_id}"
@@ -91,7 +91,7 @@ async def rules(
     limit: int = Query(50, ge=1, le=100),
     cursor: str | None = None,
     selected=Depends(scope),
-    db=Depends(database),
+    db=db_session,
 ):
     return await page(
         db,
@@ -106,7 +106,7 @@ async def rules(
 
 @router.post("/reminder-rules", status_code=201)
 async def create_rule(
-    data: ReminderValues, key=Depends(idempotency_key), selected=Depends(write_scope), db=Depends(database)
+    data: ReminderValues, key=Depends(idempotency_key), selected=Depends(write_scope), db=db_session
 ):
     body = data.model_dump(mode="json")
     cached = await previous_response(db, selected.user.id, selected.workspace_id, "reminder_rule", key, body)
@@ -132,7 +132,7 @@ class RulePatch(StrictModel):
 
 
 @router.patch("/reminder-rules/{rule_id}")
-async def update_rule(rule_id: UUID, data: RulePatch, selected=Depends(write_scope), db=Depends(database)):
+async def update_rule(rule_id: UUID, data: RulePatch, selected=Depends(write_scope), db=db_session):
     row = await scoped_get(db, ReminderRule, rule_id, selected.workspace_id)
     require(row.owner_user_id == selected.user.id, "NOT_FOUND", "Правило не найдено.", 404)
     require(row.version == data.expected_version, "VERSION_CONFLICT", "Правило уже изменилось.")
@@ -149,9 +149,7 @@ async def update_rule(rule_id: UUID, data: RulePatch, selected=Depends(write_sco
 
 
 @router.delete("/reminder-rules/{rule_id}")
-async def delete_rule(
-    rule_id: UUID, expected_version: int, selected=Depends(write_scope), db=Depends(database)
-):
+async def delete_rule(rule_id: UUID, expected_version: int, selected=Depends(write_scope), db=db_session):
     row = await scoped_get(db, ReminderRule, rule_id, selected.workspace_id)
     require(row.owner_user_id == selected.user.id, "NOT_FOUND", "Правило не найдено.", 404)
     require(row.version == expected_version, "VERSION_CONFLICT", "Правило уже изменилось.")

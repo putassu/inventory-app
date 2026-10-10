@@ -1,3 +1,4 @@
+import { randomId } from '../utils/id'
 import { write } from './client'
 import { submitConfirmation } from './confirmations'
 export { normalizeDecimal } from '../utils/quantity'
@@ -117,4 +118,4 @@ export const reverseOperation = (operationId, expectedVersions) =>
 
 // Превью отмены операции
 export const previewReverseOperation = (operationId) =>
-  write(`/operations/${operationId}/reverse-preview`, {}, 'POST', crypto.randomUUID())
+  write(`/operations/${operationId}/reverse-preview`, {}, 'POST', randomId())

@@ -15,6 +15,8 @@ import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useNotifications } from '../contexts/NotificationContext'
 import { ConfirmationStatus } from './ConfirmationStatus'
+import { ProcessingStatus } from './ProcessingStatus'
+import { useDragAutoScroll } from '../hooks/useDragAutoScroll'
 
 const NAV_ITEMS = [
   { to: '/items', icon: PackageSearch, label: 'Вещи' },
@@ -26,6 +28,7 @@ const NAV_ITEMS = [
 ]
 
 export function Layout() {
+  useDragAutoScroll()
   const { user, workspaces, activeWorkspace, selectWorkspace, logout } = useAuth()
   const { theme, setTheme } = useTheme()
   const { unreadCount = 0 } = useNotifications() || {}
@@ -191,7 +194,8 @@ export function Layout() {
 
       {/* Main Content Area */}
       <main className="main-content">
-        {activeWorkspace && <ConfirmationStatus />}
+        {activeWorkspace && <ProcessingStatus key={activeWorkspace.id} />}
+        {activeWorkspace && <ConfirmationStatus key={activeWorkspace.id} />}
         {(!workspaces || workspaces.length === 0) &&
         !location.pathname.startsWith('/admin') &&
         location.pathname !== '/settings' ? (

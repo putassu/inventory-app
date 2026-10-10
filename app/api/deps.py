@@ -25,9 +25,11 @@ async def database(request: Request):
             raise
 
 
-async def current_auth(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer), db=Depends(database)
-):
+# Клиент получает ответ только после фиксации транзакции; ошибка commit ещё может вернуть 500.
+db_session = Depends(database, scope="function")
+
+
+async def current_auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer), db=db_session):
     require(credentials, "AUTH_REQUIRED", "Требуется вход.", 401)
     return await authenticate(db, credentials.credentials)
 
@@ -51,7 +53,7 @@ async def scope(
     workspace_id: str | None = Query(None),
     x_workspace_id: str | None = Header(None),
     user=Depends(current_user),
-    db=Depends(database),
+    db=db_session,
 ):
     selected = x_workspace_id or workspace_id
     require(selected, "WORKSPACE_REQUIRED", "Передайте X-Workspace-ID или workspace_id.", 400)
@@ -65,7 +67,7 @@ async def scope(
     return Scope(user, selected)
 
 
-async def write_scope(selected=Depends(scope), db=Depends(database)):
+async def write_scope(selected=Depends(scope), db=db_session):
     await workspace_access(db, selected.workspace_id, selected.user.id, write=True, lock=True)
     return selected
 

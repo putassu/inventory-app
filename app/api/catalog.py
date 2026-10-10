@@ -1,17 +1,31 @@
 import base64
 import json
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import Field
-from sqlalchemy import and_, exists, not_, select
+from sqlalchemy import and_, case, exists, not_, or_, select
 
-from app.api.deps import database, idempotency_key, scope, write_scope
+from app.api.deps import db_session, idempotency_key, scope, write_scope
 from app.application import proposals
 from app.application.idempotency import previous_response, remember
 from app.application.inventory import row_state
+from app.application.pagination import ItemSort, ReviewStatus, item_order, ordered_page
 from app.application.photos import item_photos
-from app.db.models import Alias, Balance, Confirmation, Entry, Item, Location, Lot, Operation, Proposal, Task
+from app.db.models import (
+    Alias,
+    Balance,
+    Confirmation,
+    Entry,
+    Item,
+    Location,
+    Lot,
+    Operation,
+    Proposal,
+    Task,
+    Workspace,
+)
 from app.db.session import scoped_get
 from app.domain.common import jsonable
 from app.domain.errors import DomainError, require
@@ -26,7 +40,7 @@ def serialize(row):
     return jsonable(row_state(row))
 
 
-async def page(db, query, model, limit=50, cursor=None, render=serialize):
+async def page(db, query, model, limit=50, cursor=None, render=serialize, newest=False):
     if cursor:
         try:
             last = json.loads(base64.urlsafe_b64decode(cursor))
@@ -36,15 +50,35 @@ async def page(db, query, model, limit=50, cursor=None, render=serialize):
                 "Курсор относится к другому списку.",
                 400,
             )
-            query = query.where(model.id > str(UUID(last["id"])))
+            last_id = str(UUID(last["id"]))
+            if newest:
+                if "created_at" in last:
+                    stamp = datetime.fromisoformat(last["created_at"])
+                else:
+                    # Старые ссылки с курсором продолжают работать в своей области данных.
+                    anchor = await db.scalar(query.where(model.id == last_id))
+                    require(anchor is not None, "INVALID_CURSOR", "Обновите список.", 400)
+                    stamp = anchor.created_at
+                query = query.where(
+                    or_(model.created_at < stamp, and_(model.created_at == stamp, model.id < last_id))
+                )
+            else:
+                query = query.where(model.id > last_id)
         except (ValueError, KeyError, TypeError) as exc:
             raise DomainError("INVALID_CURSOR", "Некорректный курсор.", 400) from exc
-    rows = (await db.scalars(query.order_by(model.id).limit(limit + 1))).all()
+    order = (model.created_at.desc(), model.id.desc()) if newest else (model.id,)
+    rows = (await db.scalars(query.order_by(*order).limit(limit + 1))).all()
     more = len(rows) > limit
     rows = rows[:limit]
     cursor = (
         base64.urlsafe_b64encode(
-            json.dumps({"type": model.__tablename__, "id": rows[-1].id}).encode()
+            json.dumps(
+                {
+                    "type": model.__tablename__,
+                    "id": rows[-1].id,
+                    **({"created_at": rows[-1].created_at.isoformat()} if newest else {}),
+                }
+            ).encode()
         ).decode()
         if more
         else None
@@ -53,6 +87,8 @@ async def page(db, query, model, limit=50, cursor=None, render=serialize):
 
 
 async def item_view(db, item, photos=None):
+    from app.application.drafts import review_info
+
     lots = (
         await db.scalars(select(Lot).where(Lot.workspace_id == item.workspace_id, Lot.item_id == item.id))
     ).all()
@@ -66,6 +102,7 @@ async def item_view(db, item, photos=None):
     active_lots = {lot.id for lot in lots if lot.archived_at is None}
     result = {
         **serialize(item),
+        **await review_info(db, item),
         **aggregate([balance for balance in balances if balance.lot_id in active_lots], item.tracking_mode),
         "lots": [serialize(lot) for lot in lots],
         "balances": [serialize(b) for b in balances],
@@ -106,7 +143,9 @@ async def units(selected=Depends(scope)):
 
 
 @router.get("/forms")
-async def forms(operation: str = "receive_stock", category: str = "other", selected=Depends(scope)):
+async def forms(
+    operation: str = "receive_stock", category: str = "other", selected=Depends(scope), db=db_session
+):
     from app.domain.schemas import COMMANDS, Action
 
     require(operation in COMMANDS, "UNSUPPORTED_OPERATION", "Операция не поддерживается.", 422)
@@ -122,13 +161,15 @@ async def forms(operation: str = "receive_stock", category: str = "other", selec
         "schema_version": "review.v1",
         "type": operation,
         "actions": [action],
-        "fields": proposals.form_fields([action], "manual"),
+        "fields": proposals.form_fields(
+            [action], "manual", (await db.get(Workspace, selected.workspace_id)).item_fields
+        ),
     }
 
 
 @router.post("/proposals/manual", status_code=201)
 async def manual_proposal(
-    data: ManualProposal, key=Depends(idempotency_key), selected=Depends(write_scope), db=Depends(database)
+    data: ManualProposal, key=Depends(idempotency_key), selected=Depends(write_scope), db=db_session
 ):
     body = data.model_dump(mode="json")
     cached = await previous_response(
@@ -148,7 +189,7 @@ async def manual_proposal(
 
 @router.post("/commands/manual-confirm", status_code=202)
 async def manual_confirm(
-    data: ManualConfirm, key=Depends(idempotency_key), selected=Depends(write_scope), db=Depends(database)
+    data: ManualConfirm, key=Depends(idempotency_key), selected=Depends(write_scope), db=db_session
 ):
     body = data.model_dump(mode="json")
     cached = await previous_response(db, selected.user.id, selected.workspace_id, "manual_confirm", key, body)
@@ -174,9 +215,25 @@ async def manual_confirm(
 
 
 @router.get("/proposals/{proposal_id}")
-async def get_proposal(proposal_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def get_proposal(proposal_id: UUID, selected=Depends(scope), db=db_session):
     proposal = await scoped_get(db, Proposal, proposal_id, selected.workspace_id)
     require(proposal.status not in {"deleted", "purged"}, "NOT_FOUND", "Предложение удалено.", 404)
+    if proposal.status != "editable":
+        confirmation = await db.scalar(
+            select(Confirmation)
+            .where(
+                Confirmation.workspace_id == selected.workspace_id,
+                Confirmation.proposal_id == proposal.id,
+            )
+            .order_by(Confirmation.created_at.desc(), Confirmation.id.desc())
+            .limit(1)
+        )
+        if confirmation:
+            # Receipt восстанавливается после потери ответа; сохранённый review_hash не меняется.
+            return {
+                **proposal.document,
+                "confirmation": proposals.confirmation_view(confirmation, proposal.task_id),
+            }
     return proposal.document
 
 
@@ -186,7 +243,7 @@ async def edit_proposal(
     data: EditProposal,
     key=Depends(idempotency_key),
     selected=Depends(write_scope),
-    db=Depends(database),
+    db=db_session,
 ):
     body = data.model_dump(mode="json")
     operation_scope = f"edit_proposal:{proposal_id}"
@@ -204,7 +261,7 @@ async def confirm(
     data: ConfirmProposal,
     key=Depends(idempotency_key),
     selected=Depends(write_scope),
-    db=Depends(database),
+    db=db_session,
 ):
     body = data.model_dump(mode="json")
     operation_scope = f"confirm:{proposal_id}"
@@ -218,7 +275,7 @@ async def confirm(
 
 @router.post("/proposals/{proposal_id}/cancel")
 async def cancel_proposal(
-    proposal_id: UUID, key=Depends(idempotency_key), selected=Depends(write_scope), db=Depends(database)
+    proposal_id: UUID, key=Depends(idempotency_key), selected=Depends(write_scope), db=db_session
 ):
     proposal = await scoped_get(db, Proposal, proposal_id, selected.workspace_id, lock=True)
     require(
@@ -240,7 +297,7 @@ async def cancel_proposal(
 
 
 @router.get("/confirmations/{confirmation_id}")
-async def get_confirmation(confirmation_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def get_confirmation(confirmation_id: UUID, selected=Depends(scope), db=db_session):
     return proposals.confirmation_view(
         await scoped_get(db, Confirmation, confirmation_id, selected.workspace_id)
     )
@@ -248,7 +305,7 @@ async def get_confirmation(confirmation_id: UUID, selected=Depends(scope), db=De
 
 @router.post("/confirmations/{confirmation_id}/retry", status_code=202)
 async def retry_confirmation(
-    confirmation_id: UUID, key=Depends(idempotency_key), selected=Depends(write_scope), db=Depends(database)
+    confirmation_id: UUID, key=Depends(idempotency_key), selected=Depends(write_scope), db=db_session
 ):
     operation_scope = f"retry_confirmation:{confirmation_id}"
     cached = await previous_response(db, selected.user.id, selected.workspace_id, operation_scope, key, {})
@@ -270,7 +327,7 @@ class ReviewBatch(StrictModel):
 
 @router.post("/review-batches", status_code=201)
 async def combine(
-    data: ReviewBatch, key=Depends(idempotency_key), selected=Depends(write_scope), db=Depends(database)
+    data: ReviewBatch, key=Depends(idempotency_key), selected=Depends(write_scope), db=db_session
 ):
     body = data.model_dump(mode="json")
     cached = await previous_response(db, selected.user.id, selected.workspace_id, "review_batch", key, body)
@@ -281,7 +338,7 @@ async def combine(
 
 
 @router.get("/review-batches/{proposal_id}")
-async def review_batch(proposal_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def review_batch(proposal_id: UUID, selected=Depends(scope), db=db_session):
     proposal = await scoped_get(db, Proposal, proposal_id, selected.workspace_id)
     require(proposal.status not in {"deleted", "purged"}, "NOT_FOUND", "Предложение удалено.", 404)
     require(proposal.source_proposals, "NOT_FOUND", "Общее предложение не найдено.", 404)
@@ -298,7 +355,7 @@ class BatchConfirm(StrictModel):
 
 
 @router.post("/review-inbox/batch-confirm", status_code=202)
-async def batch_confirm(data: BatchConfirm, selected=Depends(write_scope), db=Depends(database)):
+async def batch_confirm(data: BatchConfirm, selected=Depends(write_scope), db=db_session):
     results = []
     for entry in data.items:
         body = entry.model_dump(mode="json", exclude={"proposal_id", "idempotency_key"})
@@ -353,31 +410,55 @@ async def review_inbox(
     cursor: str | None = None,
     batch_id: UUID | None = None,
     selected=Depends(scope),
-    db=Depends(database),
+    db=db_session,
 ):
     query = select(Proposal).where(
         Proposal.workspace_id == selected.workspace_id, Proposal.status == "editable"
     )
     if batch_id:
         query = query.join(Task, Proposal.task_id == Task.id).where(Task.batch_id == str(batch_id))
-    return await page(
+    errors = select(Task.id).where(
+        or_(
+            Task.error_code.is_not(None),
+            exists(
+                select(Item.id).where(
+                    Item.source_task_id == Task.id,
+                    Item.workspace_id == Task.workspace_id,
+                    Item.review_status == "error",
+                    Item.lifecycle == "active",
+                )
+            ),
+        )
+    )
+    error_priority = case((Proposal.task_id.in_(errors), 0), else_=1)
+    rows, pagination = await ordered_page(
         db,
         query,
         Proposal,
+        [(error_priority, False), (Proposal.created_at, True), (Proposal.id, False)],
+        [selected.workspace_id, str(batch_id), "errors_first"],
         limit,
         cursor,
-        lambda p: {
-            "proposal_id": p.id,
-            "task_id": p.task_id,
-            "summary": p.document["summary"],
-            "can_confirm": p.document["can_confirm"],
-            "blocking_count": len(p.document["blocking_issues"]),
-            "revision": p.revision,
-            "effective_privacy": p.document["effective_privacy"],
-            "created_at": p.created_at.isoformat(),
-            "link": f"/api/v1/proposals/{p.id}",
-        },
     )
+    error_ids = set((await db.scalars(errors.where(Task.id.in_([p.task_id for p in rows])))).all())
+    return {
+        **pagination,
+        "items": [
+            {
+                "proposal_id": p.id,
+                "task_id": p.task_id,
+                "summary": p.document["summary"],
+                "can_confirm": p.document["can_confirm"],
+                "blocking_count": len(p.document["blocking_issues"]),
+                "revision": p.revision,
+                "effective_privacy": p.document["effective_privacy"],
+                "created_at": p.created_at.isoformat(),
+                "link": f"/api/v1/proposals/{p.id}",
+                "review_status": "error" if p.task_id in error_ids else "unconfirmed",
+            }
+            for p in rows
+        ],
+    }
 
 
 @router.get("/items")
@@ -387,8 +468,10 @@ async def items(
     category: str | None = None,
     include_archived: bool = False,
     availability: str | None = None,
+    review_status: ReviewStatus | None = None,
+    sort: ItemSort = "newest",
     selected=Depends(scope),
-    db=Depends(database),
+    db=db_session,
 ):
     query = select(Item).where(
         Item.workspace_id == selected.workspace_id,
@@ -396,6 +479,8 @@ async def items(
     )
     if category:
         query = query.where(Item.primary_category == category)
+    if review_status:
+        query = query.where(Item.review_status == review_status)
     if availability:
         require(
             availability in {"available", "depleted"}, "INVALID_FILTER", "Неизвестный фильтр наличия.", 422
@@ -412,28 +497,33 @@ async def items(
         )
         depleted = and_(Item.tracking_mode != "untracked", not_(remains))
         query = query.where(depleted if availability == "depleted" else not_(depleted))
-    result = await page(db, query, Item, limit, cursor)
-    photos = await item_photos(db, selected.workspace_id, [item["id"] for item in result["items"]])
-    result["items"] = [
-        await item_view(db, await db.get(Item, item["id"]), photos[item["id"]]) for item in result["items"]
-    ]
-    return result
+    rows, pagination = await ordered_page(
+        db,
+        query,
+        Item,
+        item_order(sort),
+        [selected.workspace_id, category, include_archived, availability, review_status, sort],
+        limit,
+        cursor,
+    )
+    photos = await item_photos(db, selected.workspace_id, [item.id for item in rows])
+    return {**pagination, "items": [await item_view(db, item, photos[item.id]) for item in rows]}
 
 
 @router.get("/items/{item_id}")
-async def get_item(item_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def get_item(item_id: UUID, selected=Depends(scope), db=db_session):
     item = await scoped_get(db, Item, item_id, selected.workspace_id)
     require(item.lifecycle != "deleted", "NOT_FOUND", "Карточка удалена.", 404)
     return await item_view(db, item)
 
 
 @router.get("/items/{item_id}/lots")
-async def item_lots(item_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def item_lots(item_id: UUID, selected=Depends(scope), db=db_session):
     return {"items": (await get_item(item_id, selected, db))["lots"], "has_more": False, "next_cursor": None}
 
 
 @router.get("/items/{item_id}/balances")
-async def item_balances(item_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def item_balances(item_id: UUID, selected=Depends(scope), db=db_session):
     view = await get_item(item_id, selected, db)
     return {
         "items": view["balances"],
@@ -447,7 +537,7 @@ async def aliases(
     limit: int = Query(50, ge=1, le=100),
     cursor: str | None = None,
     selected=Depends(scope),
-    db=Depends(database),
+    db=db_session,
 ):
     await get_item(item_id, selected, db)
     return await page(
@@ -462,7 +552,7 @@ async def aliases(
 
 
 @router.get("/lots/{lot_id}")
-async def get_lot(lot_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def get_lot(lot_id: UUID, selected=Depends(scope), db=db_session):
     lot = await scoped_get(db, Lot, lot_id, selected.workspace_id)
     await get_item(UUID(lot.item_id), selected, db)
     return serialize(lot)
@@ -477,6 +567,7 @@ async def location_tree(db, workspace_id):
         )
     ).all()
     by_id = {r.id: r for r in locations}
+    photos = await item_photos(db, workspace_id, list(by_id), "location")
     result = []
     for row in locations:
         names = [row.name]
@@ -484,17 +575,17 @@ async def location_tree(db, workspace_id):
         while current.parent_id in by_id:
             current = by_id[current.parent_id]
             names.insert(0, current.name)
-        result.append({**serialize(row), "full_path": " / ".join(names)})
+        result.append({**serialize(row), "full_path": " / ".join(names), "photos": photos[row.id]})
     return result
 
 
 @router.get("/locations")
-async def locations(selected=Depends(scope), db=Depends(database)):
+async def locations(selected=Depends(scope), db=db_session):
     return {"items": await location_tree(db, selected.workspace_id), "has_more": False, "next_cursor": None}
 
 
 @router.get("/locations/{location_id}")
-async def get_location(location_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def get_location(location_id: UUID, selected=Depends(scope), db=db_session):
     await scoped_get(db, Location, location_id, selected.workspace_id)
     location = next(
         (r for r in await location_tree(db, selected.workspace_id) if r["id"] == str(location_id)), None
@@ -505,7 +596,7 @@ async def get_location(location_id: UUID, selected=Depends(scope), db=Depends(da
 
 @router.get("/locations/{location_id}/contents")
 async def location_contents(
-    location_id: UUID, recursive: bool = False, selected=Depends(scope), db=Depends(database)
+    location_id: UUID, recursive: bool = False, selected=Depends(scope), db=db_session
 ):
     await scoped_get(db, Location, location_id, selected.workspace_id)
     ids = {str(location_id)}
@@ -541,7 +632,7 @@ async def operations(
     limit: int = Query(50, ge=1, le=100),
     cursor: str | None = None,
     selected=Depends(scope),
-    db=Depends(database),
+    db=db_session,
 ):
     return await page(
         db,
@@ -551,11 +642,12 @@ async def operations(
         Operation,
         limit,
         cursor,
+        newest=True,
     )
 
 
 @router.get("/operations/{operation_id}")
-async def operation(operation_id: UUID, selected=Depends(scope), db=Depends(database)):
+async def operation(operation_id: UUID, selected=Depends(scope), db=db_session):
     row = await scoped_get(db, Operation, operation_id, selected.workspace_id)
     require(row.status not in {"deleted", "purged"}, "NOT_FOUND", "Операция удалена.", 404)
     entries = (
@@ -570,7 +662,7 @@ async def history(
     limit: int = Query(50, ge=1, le=100),
     cursor: str | None = None,
     selected=Depends(scope),
-    db=Depends(database),
+    db=db_session,
 ):
     view = await get_item(item_id, selected, db)
     ids = [
@@ -589,12 +681,13 @@ async def history(
         Operation,
         limit,
         cursor,
+        newest=True,
     )
 
 
 @router.post("/operations/{operation_id}/reverse-preview", status_code=201)
 async def reverse_preview(
-    operation_id: UUID, key=Depends(idempotency_key), selected=Depends(write_scope), db=Depends(database)
+    operation_id: UUID, key=Depends(idempotency_key), selected=Depends(write_scope), db=db_session
 ):
     operation_scope = f"reverse:{operation_id}"
     cached = await previous_response(db, selected.user.id, selected.workspace_id, operation_scope, key, {})

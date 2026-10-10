@@ -1,13 +1,17 @@
+import { randomId } from '../utils/id'
 import { useEffect, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { write } from '../api/client'
 import { useTasks, terminalTask } from '../contexts/TaskContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useResource } from '../hooks/useResource'
 import { label } from '../utils/labels'
 import { Button } from '../components/ui/Button'
+import { StageRing } from '../components/StageRing'
+import { Thumbnail } from '../components/ui/Thumbnail'
 
 function TaskCard({ task, detailed = false }) {
+  const navigate = useNavigate()
   const { user } = useAuth()
   const { addTask, refreshTasks } = useTasks()
   const [busy, setBusy] = useState(false)
@@ -35,8 +39,8 @@ function TaskCard({ task, detailed = false }) {
       if (attempt.current?.name !== name)
         attempt.current = {
           name,
-          key: crypto.randomUUID(),
-          body: name === 'cancel' ? {} : { client_request_id: crypto.randomUUID() },
+          key: randomId(),
+          body: name === 'cancel' ? {} : { client_request_id: randomId() },
         }
       const result = await write(
         `/tasks/${task.task_id}/${name}`,
@@ -47,6 +51,9 @@ function TaskCard({ task, detailed = false }) {
       if (result.task_id && result.status_version) addTask(result)
       await refreshTasks()
       attempt.current = null
+      if (name === 'retry' && result.task_id && result.task_id !== task.task_id)
+        navigate(`/tasks/${result.task_id}`)
+      if (name === 'manual-review' && result.proposal_id) navigate(`/review/${result.proposal_id}`)
     } catch (cause) {
       setError(cause.message)
     } finally {
@@ -56,12 +63,19 @@ function TaskCard({ task, detailed = false }) {
   return (
     <article className="card page-stack">
       <div className="toolbar">
+        <Thumbnail mediaId={task.preview_media_id} alt="Фото задачи" size={72} />
         <h2>
           <Link to={`/tasks/${task.task_id}`}>
             {task.title || `Обработка: ${label(task.input_mode || 'text')}`}
           </Link>
         </h2>
-        <span className={`status-badge status-${task.status}`}>{label(task.status)}</span>
+        <span
+          className={`status-badge status-${task.error_code && task.status === 'waiting_for_review' ? 'failed' : task.status}`}
+        >
+          {task.error_code && task.status === 'waiting_for_review'
+            ? 'Ошибка распознавания'
+            : label(task.status)}
+        </span>
       </div>
       <small>Создано: {new Date(task.created_at).toLocaleString('ru-RU')}</small>
       <p>
@@ -70,17 +84,13 @@ function TaskCard({ task, detailed = false }) {
           task.status !== 'waiting_for_review' &&
           current?.started_at && <span> · {elapsed} с</span>}
       </p>
-      {task.progress?.percent != null ? (
-        <progress max="100" value={task.progress.percent} aria-label="Прогресс обработки" />
-      ) : (
-        !terminalTask(task.status) &&
-        task.status !== 'waiting_for_review' && (
-          <p className="muted">Процент завершения пока неизвестен.</p>
-        )
-      )}
+      <StageRing task={task} detailed={detailed} />
       {task.error_code && (
         <p className="error">
-          Обработка остановлена: {task.error_code}. Можно повторить или продолжить вручную.
+          {task.error_code === 'UNKNOWN_MODEL_CANDIDATE'
+            ? 'Модель не смогла надёжно сопоставить вещь с каталогом. Проверьте предложение вручную.'
+            : 'Распознавание не завершено. Проверьте предложение или повторите обработку.'}{' '}
+          <small>Код: {task.error_code}</small>
         </p>
       )}
       {error && (
@@ -89,6 +99,11 @@ function TaskCard({ task, detailed = false }) {
         </p>
       )}
       <div className="toolbar">
+        {task.catalog_item_ids?.map((id) => (
+          <Link key={id} to={`/items/${id}`}>
+            Карточка в каталоге
+          </Link>
+        ))}
         {task.proposal_id && (
           <Link className="btn btn-primary" to={`/review/${task.proposal_id}`}>
             {task.status === 'waiting_for_review'
@@ -107,14 +122,16 @@ function TaskCard({ task, detailed = false }) {
             Отменить задачу
           </Button>
         )}
-        {['failed', 'cancelled', 'expired'].includes(task.status) && (
+        {(task.can_retry ?? ['failed', 'cancelled', 'expired'].includes(task.status)) && (
           <>
             <Button disabled={busy} onClick={() => action('retry')}>
               Повторить обработку
             </Button>
-            <Button variant="secondary" disabled={busy} onClick={() => action('manual-review')}>
-              Продолжить вручную
-            </Button>
+            {task.purpose !== 'ocr' && !task.proposal_id && (
+              <Button variant="secondary" disabled={busy} onClick={() => action('manual-review')}>
+                Продолжить вручную
+              </Button>
+            )}
           </>
         )}
         {user?.app_role === 'admin' && (
@@ -123,6 +140,12 @@ function TaskCard({ task, detailed = false }) {
       </div>
       {detailed && (
         <>
+          {task.purpose === 'ocr' && task.result?.ocr_text && (
+            <details open>
+              <summary>Распознанный текст — проверьте перед сохранением</summary>
+              <pre className="ocr-text">{task.result.ocr_text}</pre>
+            </details>
+          )}
           <h3>Стадии обработки</h3>
           <ol className="timeline">
             {task.progress?.history?.map((stage, index) => (

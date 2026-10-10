@@ -5,26 +5,38 @@ import { useResource } from '../hooks/useResource'
 import { previewReverseOperation } from '../api/commands'
 import { label } from '../utils/labels'
 import { Button } from '../components/ui/Button'
+import { ChangePreview } from '../components/review/ChangePreview'
 export function History() {
   const page = usePaged('/operations?limit=30')
   return (
     <section className="page-stack">
-      <h1>История операций</h1>
+      <div className="toolbar">
+        <h1>История операций</h1>
+        <Button variant="secondary" onClick={page.reload} disabled={page.loading}>
+          Обновить
+        </Button>
+      </div>
       {page.error && <p role="alert">{page.error.message}</p>}
       {page.items.map((operation) => (
         <Link className="card" to={`/operations/${operation.id}`} key={operation.id}>
           {label(operation.type || operation.command_type) || 'Операция учёта'} ·{' '}
-          {new Date(operation.created_at).toLocaleString('ru-RU')} · {operation.status}
+          {new Date(operation.created_at).toLocaleString('ru-RU')} · {label(operation.status)}
         </Link>
       ))}
       {page.loading && <p>Загрузка…</p>}
-      {page.next_cursor && <Button onClick={page.more}>Загрузить ещё</Button>}
+      {!page.loading && !page.error && !page.items.length && <p>Операций пока нет.</p>}
+      {page.next_cursor && (
+        <Button disabled={page.loading} onClick={page.more}>
+          Загрузить ещё
+        </Button>
+      )}
     </section>
   )
 }
 export function OperationDetail() {
   const { id } = useParams()
   const { data, error } = useResource(`/operations/${id}`)
+  const locations = useResource('/locations')
   const [failure, setFailure] = useState('')
   const [busy, setBusy] = useState(false)
   const navigate = useNavigate()
@@ -47,19 +59,20 @@ export function OperationDetail() {
       {data && (
         <>
           <p>
-            {data.status} · {new Date(data.created_at).toLocaleString('ru-RU')}
+            {label(data.type)} · {label(data.status)} ·{' '}
+            {new Date(data.created_at).toLocaleString('ru-RU')}
           </p>
           {data.entries.map((entry) => (
             <div className="card" key={entry.id}>
-              <strong>{entry.entity_type}</strong>
+              <h2>{label(entry.entity_type)}</h2>
               {entry.entity_type === 'item' && (
                 <Link to={`/items/${entry.entity_id}`}>Открыть вещь</Link>
               )}
-              <div className="before-after">
-                <pre>{JSON.stringify(entry.before_state ?? entry.before, null, 2)}</pre>
-                <span>→</span>
-                <pre>{JSON.stringify(entry.after_state ?? entry.after, null, 2)}</pre>
-              </div>
+              <ChangePreview
+                before={entry.before_state ?? entry.before}
+                after={entry.after_state ?? entry.after}
+                locations={locations.data?.items}
+              />
             </div>
           ))}
           <Button variant="secondary" disabled={busy} onClick={reverse}>

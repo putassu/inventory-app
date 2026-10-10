@@ -12,6 +12,7 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
   const [activeWorkspace, setActiveWorkspace] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [sessionError, setSessionError] = useState('')
   useEffect(() => {
     let active = true
     const unsubscribe = onSessionExpired(() => {
@@ -26,7 +27,12 @@ export function AuthProvider({ children }) {
         setUser(data)
         setActiveWorkspace(workspace)
       })
-      .catch(() => {})
+      .catch((cause) => {
+        if (active && ![401, 403].includes(cause.status) && cause.name !== 'AbortError')
+          setSessionError(
+            'Не удалось связаться с сервером. Проверьте подключение и повторите загрузку.',
+          )
+      })
       .finally(() => {
         if (active) setIsLoading(false)
       })
@@ -47,6 +53,7 @@ export function AuthProvider({ children }) {
     setSession(undefined, workspace?.id || null, profile.id)
     setUser(profile)
     setActiveWorkspace(workspace)
+    setSessionError('')
   }
   async function logout(all = false) {
     if (!window.dispatchEvent(new Event('inventory:before-scope-change', { cancelable: true })))
@@ -75,9 +82,11 @@ export function AuthProvider({ children }) {
         workspaces: user?.workspaces || [],
         activeWorkspace,
         isLoading,
+        sessionError,
         login,
         logout,
         selectWorkspace,
+        updateProfile: (profile) => setUser((current) => ({ ...current, ...profile })),
       }}
     >
       {children}

@@ -5,7 +5,7 @@ description = "Личный учёт вещей с обязательным по
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.13,<2", "argon2-cffi>=23,<26", "arq>=0.26,<0.27",
-  "asyncpg>=0.29,<1", "boto3>=1.35,<2", "fastapi>=0.115,<1",
+  "asyncpg>=0.29,<1", "boto3>=1.35,<2", "fastapi>=0.121.1,<1",
   "httpx[socks]>=0.27,<1", "jinja2>=3.1,<4", "pillow>=11,<13",
   "pydantic-settings>=2.6,<3", "pyjwt>=2.9,<3", "python-dateutil>=2.9,<3",
   "python-multipart>=0.0.18,<1", "qdrant-client>=1.14,<2",

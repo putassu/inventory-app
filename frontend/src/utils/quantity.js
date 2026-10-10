@@ -20,9 +20,21 @@ export function stepDecimal(value, step, direction, min = '0', max) {
   return decimal(next)
 }
 export const unitLabel = (code) =>
-  ({ pcs: 'шт.', pair: 'пар', kg: 'кг', g: 'г', l: 'л', ml: 'мл', m: 'м', cm: 'см', pack: 'уп.' })[
-    code
-  ] ||
+  ({
+    pcs: 'шт.',
+    pair: 'пар',
+    kg: 'кг',
+    g: 'г',
+    mg: 'мг',
+    l: 'л',
+    ml: 'мл',
+    m: 'м',
+    cm: 'см',
+    pack: 'уп.',
+    package: 'уп.',
+    tablet: 'табл.',
+    capsule: 'капс.',
+  })[code] ||
   code ||
   ''
 export const displayDecimal = (value) =>
@@ -32,6 +44,22 @@ export const displayDecimal = (value) =>
         .replace(/(\.\d*?)0+$/, '$1')
         .replace(/\.$/, '')
         .replace('.', ',')
+export function formatPairs(pieces) {
+  const amount = scaled(pieces)
+  const pairs = amount / (2n * SCALE)
+  const rest = amount % (2n * SCALE)
+  const ending =
+    pairs % 100n >= 11n && pairs % 100n <= 14n
+      ? 'пар'
+      : pairs % 10n === 1n
+        ? 'пара'
+        : pairs % 10n >= 2n && pairs % 10n <= 4n
+          ? 'пары'
+          : 'пар'
+  return pairs === 0n && rest > 0n
+    ? `${displayDecimal(decimal(rest))} шт.`
+    : `${pairs} ${ending}${rest ? ` + ${displayDecimal(decimal(rest))} шт.` : ''}`
+}
 export function formatQuantity(item) {
   if (item.tracking_mode === 'untracked') return 'Учёт присутствия'
   const known = item.known_quantity
@@ -39,16 +67,19 @@ export function formatQuantity(item) {
   if (known == null || (unknown && scaled(known) === 0n)) return 'Количество неизвестно'
   let text = `${displayDecimal(known)} ${unitLabel(item.base_unit_id || item.unit_code)}`
   if (item.quantity_display && scaled(known) > 0n) {
-    const { complete_pairs, single_pieces } = item.quantity_display
-    text = `${complete_pairs} пар${scaled(single_pieces) ? ` + ${displayDecimal(single_pieces)} шт.` : ''}`
+    text = formatPairs(known)
   }
   if (item.is_estimated) text = `Примерно ${text}`
   if (unknown) text += '; ещё есть неуточнённый остаток'
   else if (item.depleted) text += ' — закончилось'
   return text.trim()
 }
-export function formatBalance(balance, unit) {
+export function formatBalance(balance, unit, countingUnit) {
   if (balance.quantity_state === 'not_applicable') return 'Учёт присутствия'
   if (balance.quantity_state === 'unknown') return 'Количество неизвестно'
-  return `${balance.quantity_state === 'estimated' ? 'Примерно ' : ''}${displayDecimal(balance.quantity)} ${unitLabel(unit)}`
+  const amount =
+    unit === 'pcs' && countingUnit === 'pair'
+      ? formatPairs(balance.quantity)
+      : `${displayDecimal(balance.quantity)} ${unitLabel(unit)}`
+  return `${balance.quantity_state === 'estimated' ? 'Примерно ' : ''}${amount}`
 }

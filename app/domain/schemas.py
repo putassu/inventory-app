@@ -50,6 +50,8 @@ class LotFields(StrictModel):
 
 
 class Receive(LotFields):
+    custom_attributes: dict = Field(default_factory=dict)
+    media_ids: list[UUID] = Field(default_factory=list, max_length=20)
     item_mode: Literal["create", "existing"] = "create"
     item_id: UUID | None = None
     item_name: str | None = Field(None, max_length=255)
@@ -70,8 +72,16 @@ class Receive(LotFields):
     model: str | None = Field(None, max_length=255)
     user_description: str | None = Field(None, max_length=10000)
     generated_description: str | None = Field(None, max_length=10000)
+    ocr_text: str | None = Field(None, max_length=100000)
     separate_item: bool = False
     package_size: Quantity | None = None
+
+
+class VerifyItem(Receive):
+    item_id: UUID
+    item_mode: Literal["create"] = "create"
+    lot_mode: Literal["create"] = "create"
+    lot_id: None = None
 
 
 class StockSource(StrictModel):
@@ -103,6 +113,9 @@ class ItemRef(StrictModel):
 
 
 class UpdateItem(ItemRef):
+    custom_attributes: dict | None = None
+    media_ids: list[UUID] = Field(default_factory=list, max_length=20)
+    ocr_text: str | None = Field(None, max_length=100000)
     name: str | None = Field(None, min_length=1, max_length=255)
     primary_category: Category | None = None
     attributes: dict | None = None
@@ -127,7 +140,14 @@ class MergeLots(StrictModel):
     lot_ids: list[UUID] = Field(default_factory=list, min_length=2, max_length=20)
 
 
+class MergeItems(StrictModel):
+    source_item_id: UUID
+    target_item_id: UUID
+    target_location_id: UUID | None = None
+
+
 class CreateLocation(StrictModel):
+    media_ids: list[UUID] = Field(default_factory=list, max_length=20)
     name: str | None = Field(None, max_length=255)
     parent_id: UUID | None = None
     description: str | None = Field(None, max_length=5000)
@@ -141,6 +161,7 @@ class MoveLocation(StrictModel):
 
 
 class UpdateLocation(StrictModel):
+    media_ids: list[UUID] = Field(default_factory=list, max_length=20)
     location_id: UUID | None = None
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = Field(None, max_length=5000)
@@ -167,6 +188,7 @@ class Reverse(StrictModel):
 
 COMMANDS: dict[str, type[StrictModel]] = {
     "receive_stock": Receive,
+    "verify_item": VerifyItem,
     "move_stock": Move,
     "consume_stock": Consume,
     "set_quantity": SetQuantity,
@@ -174,6 +196,7 @@ COMMANDS: dict[str, type[StrictModel]] = {
     "update_lot": UpdateLot,
     "split_lot": SplitLot,
     "merge_lots": MergeLots,
+    "merge_items": MergeItems,
     "create_location": CreateLocation,
     "move_location": MoveLocation,
     "update_location": UpdateLocation,
@@ -187,6 +210,7 @@ COMMANDS: dict[str, type[StrictModel]] = {
 }
 CommandType = Literal[
     "receive_stock",
+    "verify_item",
     "move_stock",
     "consume_stock",
     "set_quantity",
@@ -194,6 +218,7 @@ CommandType = Literal[
     "update_lot",
     "split_lot",
     "merge_lots",
+    "merge_items",
     "create_location",
     "move_location",
     "update_location",
@@ -254,9 +279,11 @@ class Context(StrictModel):
 
 class Privacy(StrictModel):
     force_local: bool = True
+    model_preference: Literal["default", "local", "cloud"] = "default"
 
 
 class TaskCreate(StrictModel):
+    purpose: Literal["inventory", "ocr"] = "inventory"
     workspace_id: UUID | None = None
     client_request_id: UUID
     input_mode: Literal["text", "photo", "audio", "photo_audio", "manual"] = "text"

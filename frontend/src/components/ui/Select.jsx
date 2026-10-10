@@ -1,6 +1,7 @@
 import { forwardRef, useId } from 'react'
+import { Help } from './Help'
 export const Select = forwardRef(function Select(
-  { label, error, helpText, className = '', id, children, ...props },
+  { label, error, helpText, info, className = '', id, children, ...props },
   ref,
 ) {
   const generated = useId()
@@ -8,7 +9,12 @@ export const Select = forwardRef(function Select(
   const help = error || helpText
   return (
     <div className={`input-group ${className}`}>
-      {label && <label htmlFor={selectId}>{label}</label>}
+      {label && (
+        <div className="field-label">
+          <label htmlFor={selectId}>{label}</label>
+          {info && <Help title={label}>{info}</Help>}
+        </div>
+      )}
       <select
         ref={ref}
         id={selectId}

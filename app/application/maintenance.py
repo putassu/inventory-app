@@ -125,8 +125,14 @@ async def export_job(factory, job_id):
             await db.scalars(
                 select(Binding).where(
                     Binding.workspace_id == job.workspace_id,
-                    Binding.entity_type == "item",
-                    Binding.entity_id.in_([i["id"] for i in payload["items"]]),
+                    (
+                        (Binding.entity_type == "item")
+                        & Binding.entity_id.in_([i["id"] for i in payload["items"]])
+                    )
+                    | (
+                        (Binding.entity_type == "location")
+                        & Binding.entity_id.in_([r["id"] for r in payload["locations"]])
+                    ),
                 )
             )
         ).all()
@@ -386,6 +392,7 @@ async def block_deleted_data(db, workspace_id, item_ids):
             and b.entity_id in live_items
             or b.entity_type == "task"
             and b.entity_id in live_tasks
+            or b.entity_type == "location"
         )
     }
     for media_id in {b.media_id for b in targeted} - other_media:
@@ -749,6 +756,11 @@ async def cleanup_scope(db, settings, now):
     task_days = settings["retention.task_input_days"]
     photo_days = settings["retention.source_photo_days"]
     draft_days = settings["retention.review_draft_days"]
+    # Проверка существующей карточки живёт вместе с ней, даже если пользователь отложил её надолго.
+    pending_items = {
+        row.id for row in items if row.lifecycle == "active" and row.review_status != "confirmed"
+    }
+    pending_tasks = {row.source_task_id for row in items if row.id in pending_items}
     archived = {
         row.id
         for row in items
@@ -762,6 +774,7 @@ async def cleanup_scope(db, settings, now):
         for row in tasks.values()
         if task_days is not None
         and row.status in TERMINAL_TASKS
+        and row.id not in pending_tasks
         and aware(row.created_at) <= now - timedelta(days=task_days)
     }
     input_ids = {
@@ -779,7 +792,11 @@ async def cleanup_scope(db, settings, now):
     draft_ids = {
         row.id
         for row in proposals
-        if draft_days is not None and aware(row.created_at) <= now - timedelta(days=draft_days)
+        if draft_days is not None
+        and aware(row.created_at) <= now - timedelta(days=draft_days)
+        and not any(
+            a["type"] == "verify_item" and a["values"].get("item_id") in pending_items for a in row.actions
+        )
     }
     by_media = {}
     for binding in bindings:
